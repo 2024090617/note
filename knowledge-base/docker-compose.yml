@@ -1,0 +1,9 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.16.2  # Align with client 1.16.x
+    container_name: qdrant
+    ports:
+      - "6333:6333"    # HTTP API
+      - "6334:6334"    # gRPC API
+    volumes:
+      - ./qdrant_data:/qdrant/storage

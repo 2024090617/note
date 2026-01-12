@@ -1,0 +1,15 @@
+# API + vector store
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.6
+# Match server version to retain .search convenience
+qdrant-client==1.16.2
+python-dotenv>=1.0.0
+
+# Optional local embedding fallback
+sentence-transformers>=3.0.0
+torch>=2.2.0
+numpy<2
+
+# File parsing
+pypdf>=5.1.0

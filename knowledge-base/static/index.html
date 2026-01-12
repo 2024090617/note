@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Knowledge Notebook</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #f5f5f5;
+            color: #333;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        
+        header {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        h1 {
+            font-size: 24px;
+            color: #1a1a1a;
+            margin-bottom: 10px;
+        }
+        
+        .search-bar {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+        }
+        
+        .search-bar input {
+            flex: 1;
+            padding: 10px 15px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 14px;
+        }
+        
+        .search-bar button {
+            padding: 10px 20px;
+            background: #3B82F6;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+        }
+        
+        .search-bar button:hover {
+            background: #2563EB;
+        }
+        
+        .main-content {
+            display: grid;
+            grid-template-columns: 250px 1fr;
+            gap: 20px;
+        }
+        
+        .sidebar {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            height: fit-content;
+        }
+        
+        .sidebar h2 {
+            font-size: 16px;
+            margin-bottom: 15px;
+            color: #1a1a1a;
+        }
+        
+        .category-list {
+            list-style: none;
+        }
+        
+        .category-item {
+            padding: 10px;
+            margin-bottom: 5px;
+            border-radius: 6px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            transition: background 0.2s;
+        }
+        
+        .category-item:hover {
+            background: #f5f5f5;
+        }
+        
+        .category-item.active {
+            background: #EFF6FF;
+            color: #3B82F6;
+            font-weight: 500;
+        }
+        
+        .category-icon {
+            font-size: 18px;
+        }
+        
+        .category-count {
+            margin-left: auto;
+            background: #f0f0f0;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+        }
+        
+        .notes-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 15px;
+        }
+        
+        .note-card {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        
+        .note-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+        }
+        
+        .note-title {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 10px;
+            color: #1a1a1a;
+        }
+        
+        .note-preview {
+            font-size: 14px;
+            color: #666;
+            line-height: 1.5;
+            margin-bottom: 15px;
+            display: -webkit-box;
+            -webkit-line-clamp: 3;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+        
+        .note-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px;
+        }
+        
+        .tag {
+            padding: 4px 10px;
+            background: #f0f0f0;
+            border-radius: 12px;
+            font-size: 12px;
+            color: #666;
+        }
+        
+        .note-meta {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid #f0f0f0;
+            font-size: 12px;
+            color: #999;
+        }
+        
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.5);
+            z-index: 1000;
+            padding: 40px;
+            overflow-y: auto;
+        }
+        
+        .modal.active {
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+        }
+        
+        .modal-content {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            max-width: 800px;
+            width: 100%;
+            margin: auto;
+        }
+        
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        
+        .modal-title {
+            font-size: 24px;
+            font-weight: 600;
+        }
+        
+        .close-btn {
+            background: none;
+            border: none;
+            font-size: 24px;
+            cursor: pointer;
+            color: #999;
+        }
+        
+        .note-content {
+            line-height: 1.6;
+            white-space: pre-wrap;
+            margin: 20px 0;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #999;
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #999;
+        }
+        
+        .empty-state h3 {
+            font-size: 18px;
+            margin-bottom: 10px;
+        }
+        
+        .btn-create {
+            background: #10B981;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+        }
+        
+        .btn-create:hover {
+            background: #059669;
+        }
+        
+        .toolbar {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        
+        .file-upload {
+            position: relative;
+            overflow: hidden;
+            display: inline-block;
+        }
+        
+        .file-upload input[type=file] {
+            position: absolute;
+            left: -9999px;
+        }
+        
+        .file-upload label {
+            padding: 10px 20px;
+            background: #8B5CF6;
+            color: white;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            display: inline-block;
+        }
+        
+        .file-upload label:hover {
+            background: #7C3AED;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📚 Knowledge Notebook</h1>
+            <p style="color: #666; margin-top: 5px;">Organize and search your notes with AI-powered semantic search</p>
+            
+            <div class="search-bar">
+                <input type="text" id="searchInput" placeholder="Search notes semantically...">
+                <button onclick="searchNotes()">🔍 Search</button>
+            </div>
+        </header>
+        
+        <div class="toolbar">
+            <button class="btn-create" onclick="showCreateModal()">+ Create Note</button>
+            <div class="file-upload">
+                <input type="file" id="fileInput" onchange="ingestFile()" accept=".txt,.md,.html,.pdf,.py,.js">
+                <label for="fileInput">📄 Ingest File</label>
+            </div>
+        </div>
+        
+        <div class="main-content">
+            <aside class="sidebar">
+                <h2>Categories</h2>
+                <ul class="category-list" id="categoryList"></ul>
+            </aside>
+            
+            <main>
+                <div id="notesContainer" class="notes-grid"></div>
+            </main>
+        </div>
+    </div>
+    
+    <!-- Note Detail Modal -->
+    <div id="noteModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 class="modal-title" id="modalTitle"></h2>
+                <button class="close-btn" onclick="closeModal()">×</button>
+            </div>
+            <div id="modalTags" class="note-tags"></div>
+            <div style="margin: 15px 0;">
+                <button onclick="editMetadata()" style="padding: 8px 16px; background: #8B5CF6; color: white; border: none; border-radius: 6px; cursor: pointer;">✏️ Edit Metadata</button>
+            </div>
+            <div id="modalContent" class="note-content"></div>
+            <div id="modalMeta" class="note-meta"></div>
+        </div>
+    </div>
+    
+    <!-- Edit Metadata Modal -->
+    <div id="editModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 class="modal-title">Edit Metadata</h2>
+                <button class="close-btn" onclick="closeEditModal()">×</button>
+            </div>
+            <div style="margin: 20px 0;">
+                <label style="display: block; margin-bottom: 10px; font-weight: 500;">Title</label>
+                <input type="text" id="editTitle" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 6px;">
+                
+                <label style="display: block; margin: 20px 0 10px; font-weight: 500;">Tags (comma-separated)</label>
+                <input type="text" id="editTags" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 6px;">
+                
+                <label style="display: block; margin: 20px 0 10px; font-weight: 500;">Status</label>
+                <select id="editStatus" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 6px;">
+                    <option value="unverified">Unverified</option>
+                    <option value="verified">Verified</option>
+                    <option value="needs_review">Needs Review</option>
+                </select>
+                
+                <label style="display: block; margin: 20px 0 10px; font-weight: 500;">Source URL</label>
+                <input type="text" id="editSourceUrl" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 6px;">
+                
+                <div style="margin-top: 20px; display: flex; gap: 10px;">
+                    <button onclick="saveMetadata()" style="flex: 1; padding: 10px; background: #10B981; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 500;">💾 Save</button>
+                    <button onclick="closeEditModal()" style="flex: 1; padding: 10px; background: #9CA3AF; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 500;">Cancel</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        const API_BASE = '';
+        let currentCategory = null;
+        let allNotes = [];
+        let currentNoteId = null;
+        
+        // Initialize
+        async function init() {
+            await loadCategories();
+            await loadAllNotes();
+        }
+        
+        // Load categories
+        async function loadCategories() {
+            try {
+                const response = await fetch(`${API_BASE}/api/categories`);
+                const categories = await response.json();
+                
+                const categoryList = document.getElementById('categoryList');
+                categoryList.innerHTML = `
+                    <li class="category-item active" onclick="filterByCategory(null)">
+                        <span class="category-icon">📋</span>
+                        <span>All Notes</span>
+                        <span class="category-count" id="count-all">0</span>
+                    </li>
+                `;
+                
+                categories.forEach(cat => {
+                    categoryList.innerHTML += `
+                        <li class="category-item" onclick="filterByCategory('${cat.id}')">
+                            <span class="category-icon">${cat.icon}</span>
+                            <span>${cat.label}</span>
+                            <span class="category-count" id="count-${cat.id}">0</span>
+                        </li>
+                    `;
+                });
+            } catch (error) {
+                console.error('Failed to load categories:', error);
+            }
+        }
+        
+        // Load all notes
+        async function loadAllNotes() {
+            showLoading();
+            try {
+                const response = await fetch(`${API_BASE}/api/notes/all`);
+                allNotes = await response.json();
+                updateCategoryCounts();
+                displayNotes(allNotes);
+            } catch (error) {
+                console.error('Failed to load notes:', error);
+                showEmpty('Failed to load notes');
+            }
+        }
+        
+        // Search notes
+        async function searchNotes() {
+            const query = document.getElementById('searchInput').value.trim();
+            if (!query) {
+                displayNotes(allNotes);
+                return;
+            }
+            
+            showLoading();
+            try {
+                const response = await fetch(`${API_BASE}/search`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query, limit: 50 })
+                });
+                const data = await response.json();
+                displayNotes(data.results);
+            } catch (error) {
+                console.error('Search failed:', error);
+                showEmpty('Search failed');
+            }
+        }
+        
+        // Filter by category
+        function filterByCategory(categoryId) {
+            currentCategory = categoryId;
+            
+            // Update active state
+            document.querySelectorAll('.category-item').forEach(item => {
+                item.classList.remove('active');
+            });
+            event.currentTarget.classList.add('active');
+            
+            // Filter notes
+            let filtered = allNotes;
+            if (categoryId) {
+                filtered = allNotes.filter(note => 
+                    note.tags && note.tags.includes(categoryId)
+                );
+            }
+            displayNotes(filtered);
+        }
+        
+        // Display notes
+        function displayNotes(notes) {
+            const container = document.getElementById('notesContainer');
+            
+            if (!notes || notes.length === 0) {
+                showEmpty('No notes found');
+                return;
+            }
+            
+            container.innerHTML = notes.map(note => `
+                <div class="note-card" onclick="showNote('${note.note_id || note.point_id}')">
+                    <div class="note-title">${escapeHtml(note.title)}</div>
+                    <div class="note-preview">${escapeHtml(note.content.substring(0, 150))}...</div>
+                    <div class="note-tags">
+                        ${(note.tags || []).slice(0, 3).map(tag => 
+                            `<span class="tag">${escapeHtml(tag)}</span>`
+                        ).join('')}
+                    </div>
+                    <div class="note-meta">
+                        <span>v${note.version || 1}</span>
+                        <span>${note.status || 'unverified'}</span>
+                    </div>
+                </div>
+            `).join('');
+        }
+        
+        // Show note detail
+        async function showNote(noteId) {
+            currentNoteId = noteId;
+            try {
+                const response = await fetch(`${API_BASE}/notes/${noteId}`);
+                const note = await response.json();
+                
+                document.getElementById('modalTitle').textContent = note.title;
+                document.getElementById('modalContent').textContent = note.content;
+                document.getElementById('modalTags').innerHTML = (note.tags || []).map(tag => 
+                    `<span class="tag">${escapeHtml(tag)}</span>`
+                ).join('');
+                document.getElementById('modalMeta').innerHTML = `
+                    <span>Version: ${note.version}</span>
+                    <span>Status: ${note.status}</span>
+                    <span>Created: ${new Date(note.created_at).toLocaleDateString()}</span>
+                `;
+                
+                document.getElementById('noteModal').classList.add('active');
+            } catch (error) {
+                console.error('Failed to load note:', error);
+            }
+        }
+        
+        // Close modal
+        function closeModal() {
+            document.getElementById('noteModal').classList.remove('active');
+            currentNoteId = null;
+        }
+        
+        // Edit metadata
+        async function editMetadata() {
+            if (!currentNoteId) return;
+            
+            try {
+                const response = await fetch(`${API_BASE}/notes/${currentNoteId}`);
+                const note = await response.json();
+                
+                document.getElementById('editTitle').value = note.title || '';
+                document.getElementById('editTags').value = (note.tags || []).join(', ');
+                document.getElementById('editStatus').value = note.status || 'unverified';
+                document.getElementById('editSourceUrl').value = note.source_url || '';
+                
+                document.getElementById('editModal').classList.add('active');
+            } catch (error) {
+                console.error('Failed to load note for editing:', error);
+            }
+        }
+        
+        // Save metadata
+        async function saveMetadata() {
+            if (!currentNoteId) return;
+            
+            const title = document.getElementById('editTitle').value.trim();
+            const tags = document.getElementById('editTags').value
+                .split(',')
+                .map(t => t.trim())
+                .filter(t => t);
+            const status = document.getElementById('editStatus').value;
+            const source_url = document.getElementById('editSourceUrl').value.trim() || null;
+            
+            const payload = {};
+            if (title) payload.title = title;
+            if (tags.length > 0) payload.tags = tags;
+            if (status) payload.status = status;
+            if (source_url !== null) payload.source_url = source_url;
+            
+            try {
+                const response = await fetch(`${API_BASE}/notes/${currentNoteId}/metadata`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                
+                if (response.ok) {
+                    closeEditModal();
+                    await showNote(currentNoteId); // Refresh note view
+                    await loadAllNotes(); // Refresh list
+                    alert('Metadata updated successfully');
+                } else {
+                    alert('Failed to update metadata');
+                }
+            } catch (error) {
+                console.error('Failed to save metadata:', error);
+                alert('Failed to update metadata');
+            }
+        }
+        
+        // Close edit modal
+        function closeEditModal() {
+            document.getElementById('editModal').classList.remove('active');
+        }
+        
+        // Ingest file
+        async function ingestFile() {
+            const fileInput = document.getElementById('fileInput');
+            const file = fileInput.files[0];
+            if (!file) return;
+            
+            const formData = new FormData();
+            formData.append('file', file);
+            
+            try {
+                const response = await fetch(`${API_BASE}/ingest`, {
+                    method: 'POST',
+                    body: formData
+                });
+                const result = await response.json();
+                alert(`File ingested: ${result.title}`);
+                fileInput.value = '';
+                await loadAllNotes();
+            } catch (error) {
+                console.error('Ingest failed:', error);
+                alert('Failed to ingest file');
+            }
+        }
+        
+        // Update category counts
+        function updateCategoryCounts() {
+            const counts = {};
+            allNotes.forEach(note => {
+                (note.tags || []).forEach(tag => {
+                    counts[tag] = (counts[tag] || 0) + 1;
+                });
+            });
+            
+            document.getElementById('count-all').textContent = allNotes.length;
+            Object.keys(counts).forEach(tag => {
+                const el = document.getElementById(`count-${tag}`);
+                if (el) el.textContent = counts[tag];
+            });
+        }
+        
+        // UI helpers
+        function showLoading() {
+            document.getElementById('notesContainer').innerHTML = '<div class="loading">Loading...</div>';
+        }
+        
+        function showEmpty(message) {
+            document.getElementById('notesContainer').innerHTML = `
+                <div class="empty-state">
+                    <h3>${message}</h3>
+                    <p>Try creating a note or ingesting a file</p>
+                </div>
+            `;
+        }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        // Start
+        init();
+    </script>
+</body>
+</html>
