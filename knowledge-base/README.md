@@ -98,44 +98,163 @@ curl -X POST http://localhost:8000/notes \
 
 ```bash
 curl -X POST http://localhost:8000/search \
-    -H 'Content-Type: application/json' \
-    -d '{"query":"how to store notes in qdrant?","limit":5}'
+
+For portable deployment (works offline, no internet required):
+
+1. **Bundle the model with your project:**
+```bash
+mkdir -p models
+cp -r ~/.cache/huggingface/hub/models--sentence-transformers--paraphrase-multilingual-MiniLM-L12-v2 models/
 ```
 
-### 4) 导入已有 summaries
+2. **Update `.env` to use local path:**
+```dotenv
+LOCAL_EMBEDDING_MODEL=./models/models--sentence-transformers--paraphrase-multilingual-MiniLM-L12-v2/snapshots/86741b4e3f5cb7765a600d3a3d55a0f6a6cb443d
+```
 
-将 `data/summaries/summary_*.json` 导入 Qdrant：
+This approach is ideal for:
+- Air-gapped environments
+- Migrating to Windows/other systems
+- Avoiding first-time download delays
+
+### Option 3: Use DeepSeek API
+
+```dotenv
+EMBEDDING_PROVIDER=deepseek
+DEEPSEEK_API_KEY=sk-your-api-key
+```
+
+## Import Existing Summaries
+
+Import summaries from `data/summaries/` into Qdrant:
 
 ```bash
 python src/ingest_summaries.py
 ```
 
-### 环境变量
+This will process all `summary_*.json` files and create searchable notes.
 
-- `QDRANT_URL`（默认 `http://localhost:6333`）
-- `QDRANT_COLLECTION`（默认 `notebook`）
-- `EMBEDDING_PROVIDER`（默认 `local`，可选 `deepseek`）
-- `LOCAL_EMBEDDING_MODEL`（默认 `sentence-transformers/all-MiniLM-L6-v2`）
-- `DEEPSEEK_API_KEY`（当 `EMBEDDING_PROVIDER=deepseek` 时必填）
+## Integration with LLM Service
 
-## 目录结构
+This knowledge base integrates with the `llm-service` for RAG (Retrieval-Augmented Generation):
+
+```python
+from notebook.storage import get_store
+from llm_service import LLMClient, Message, MessageRole
+
+# Initialize knowledge base
+kb_store = get_store()
+kb_store.ensure_collection()
+
+# Search for context
+results = kb_store.search("Python best practices", limit=3)
+
+# Use with LLM
+client = LLMClient()
+context = "\n".join([r['content'] for r in results])
+response = client.simple_query(
+    f"Context: {context}\n\nQuestion: How to write clean Python code?"
+)
+```
+
+See `llm-service/examples/knowledge_base_agent.py` for a complete RAG agent example.
+
+## Project Structure
 
 ```
 knowledge-base/
 ├── config/
-│   └── config.py
+│   ├── __init__.py
+│   └── config.py              # Configuration settings
 ├── src/
-│   ├── main.py
-│   ├── crawler.py
-│   └── summarizer.py
+│   ├── notebook/
+│   │   ├── __init__.py
+│   │   ├── api.py             # FastAPI REST endpoints
+│   │   ├── embedder.py        # Embedding generation
+│   │   ├── models.py          # Data models
+│   │   ├── parsers.py         # Content parsers
+│   │   ├── settings.py        # Settings management
+│   │   └── storage.py         # Qdrant storage layer
+│   ├── crawler.py             # Web scraping
+│   ├── summarizer.py          # Content summarization
+│   └── ingest_summaries.py    # Import existing data
 ├── data/
-│   └── summaries/
+│   └── summaries/             # Saved summaries (JSON)
+├── qdrant_data/               # Qdrant database files
+├── models/                    # Bundled embedding models (optional)
+├── static/
+│   └── index.html             # Web UI
+├── docker-compose.yml         # Qdrant setup
 ├── requirements.txt
+├── .env                       # Environment configuration
 └── README.md
 ```
 
-## 注意事项
+## Environment Variables Reference
 
-1. 确保你有有效的 DeepSeek API 密钥
-2. 根据目标网站的具体情况调整 CSS 选择器
-3. 遵守目标网站的爬虫政策和使用条款 
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `QDRANT_URL` | Qdrant server URL | `http://localhost:6333` |
+| `QDRANT_COLLECTION` | Collection name | `notebook` |
+| `EMBEDDING_PROVIDER` | Embedding provider (`local` or `deepseek`) | `local` |
+| `LOCAL_EMBEDDING_MODEL` | Model name or path | `paraphrase-multilingual-MiniLM-L12-v2` |
+| `DEEPSEEK_API_KEY` | DeepSeek API key (for embeddings) | - |
+| `GITHUB_TOKEN` | GitHub token (for LLM integration) | - |
+
+## Migration to Windows
+
+To migrate this project to Windows:
+
+1. **Copy the entire project folder**
+2. **Bundle the embedding model** (see Option 2 above)
+3. **On Windows:**
+   - Install Python 3.8+
+   - Install Docker Desktop
+   - Run `pip install -r requirements.txt`
+   - Start Qdrant: `docker compose up -d`
+   - Start API: `uvicorn src.notebook.api:app --reload --port 8000`
+
+The bundled model path (`./models/...`) works on both macOS and Windows!
+
+## Best Practices
+
+1. ✅ **Use local embedding models** for offline capability and faster performance
+2. ✅ **Version your notes** using the built-in versioning system
+3. ✅ **Tag your content** properly for better organization
+4. ✅ **Backup Qdrant data** regularly (the `qdrant_data/` directory)
+5. ⚠️ **Respect website ToS** when scraping content
+6. ⚠️ **Secure your API keys** - never commit `.env` to version control
+
+## Troubleshooting
+
+### Qdrant Connection Error
+```bash
+# Check if Qdrant is running
+docker ps | grep qdrant
+
+# Restart Qdrant
+docker compose restart
+```
+
+### Model Download Issues
+```bash
+# Pre-download the model manually
+python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')"
+```
+
+### Import Errors
+```bash
+# Ensure you're in the correct conda environment
+conda activate py312
+
+# Reinstall dependencies
+pip install -r requirements.txt --force-reinstall
+```
+
+## License
+
+MIT
+
+## Contributing
+
+Contributions welcome! Please open an issue or submit a pull request. 
