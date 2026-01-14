@@ -1,3 +1,4 @@
 qdrant_data/
 __pycache__/
 .env
+llm_service.egg-info/
