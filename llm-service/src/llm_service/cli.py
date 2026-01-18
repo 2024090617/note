@@ -387,5 +387,304 @@ def setup():
         sys.exit(1)
 
 
+# ============================================================================
+# Thesis Commands
+# ============================================================================
+
+@main.group()
+def thesis():
+    """Thesis writing assistant commands (学位论文写作助手)."""
+    pass
+
+
+@thesis.command()
+@click.argument("query")
+@click.option("--sources", "-s", multiple=True, default=["arxiv", "semantic_scholar"], 
+              help="Sources to search (arxiv, semantic_scholar)")
+@click.option("--limit", "-l", type=int, default=10, help="Maximum papers per source")
+@click.option("--no-auto-add", is_flag=True, help="Don't automatically add to knowledge base")
+def search(query: str, sources: tuple, limit: int, no_auto_add: bool):
+    """Search for academic papers (搜索学术论文).
+    
+    Examples:
+        llm thesis search "深度学习在自然语言处理中的应用"
+        llm thesis search "Transformer models" --sources arxiv --limit 20
+    """
+    from .thesis.agent import ThesisAgent
+    
+    try:
+        with console.status("[bold blue]Searching papers...", spinner="dots"):
+            agent = ThesisAgent()
+            papers = agent.search_papers(
+                query=query,
+                sources=list(sources),
+                limit=limit,
+                auto_add=not no_auto_add
+            )
+        
+        if not papers:
+            console.print("[yellow]No papers found[/yellow]")
+            console.print("\n[dim]Tips:[/dim]")
+            console.print("  • Try using English keywords instead of Chinese")
+            console.print("  • Use simpler, more general terms")
+            console.print("  • Try --sources arxiv to avoid rate limits")
+            console.print("\nExample: [cyan]llm thesis search \"AI programming developer mental health\" --sources arxiv[/cyan]")
+            return
+        
+        console.print(f"\n[bold green]Found {len(papers)} papers:[/bold green]\n")
+        
+        for i, paper in enumerate(papers, 1):
+            console.print(f"[bold]{i}. {paper.title}[/bold]")
+            console.print(f"   Authors: {', '.join(paper.authors[:3])}")
+            if len(paper.authors) > 3:
+                console.print(f"   ... and {len(paper.authors) - 3} more")
+            console.print(f"   Year: {paper.publication_year}")
+            if paper.publication_venue:
+                console.print(f"   Venue: {paper.publication_venue}")
+            if paper.citation_count:
+                console.print(f"   Citations: {paper.citation_count}")
+            if paper.arxiv_id:
+                console.print(f"   ArXiv: {paper.arxiv_id}")
+            if paper.doi:
+                console.print(f"   DOI: {paper.doi}")
+            console.print()
+        
+        if not no_auto_add:
+            console.print(f"[green]✓ Added {len(papers)} papers to knowledge base[/green]")
+    
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        sys.exit(1)
+
+
+@thesis.command()
+@click.option("--tags", "-t", multiple=True, help="Filter by tags")
+@click.option("--limit", "-l", type=int, default=20, help="Maximum results")
+@click.option("--sort", type=click.Choice(["year", "citations", "title"]), default="year")
+def list_papers(tags: tuple, limit: int, sort: str):
+    """List papers in knowledge base (列出知识库中的论文)."""
+    from .thesis.agent import ThesisAgent
+    
+    try:
+        agent = ThesisAgent()
+        papers = agent.list_papers(tags=list(tags) if tags else None, limit=limit)
+        
+        if not papers:
+            console.print("[yellow]No papers found in knowledge base[/yellow]")
+            return
+        
+        console.print(f"\n[bold green]Papers in knowledge base ({len(papers)}):[/bold green]\n")
+        
+        for i, paper in enumerate(papers, 1):
+            title = paper.get("title", "Unknown")
+            metadata = paper.get("metadata", {})
+            
+            console.print(f"[bold]{i}. {title}[/bold]")
+            if metadata.get("authors"):
+                console.print(f"   Authors: {', '.join(metadata['authors'][:3])}")
+            if metadata.get("publication_year"):
+                console.print(f"   Year: {metadata['publication_year']}")
+            if metadata.get("citation_count"):
+                console.print(f"   Citations: {metadata['citation_count']}")
+            console.print()
+    
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        sys.exit(1)
+
+
+@thesis.command()
+@click.argument("topic")
+@click.option("--requirements", "-r", help="Additional requirements")
+@click.option("--output", "-o", type=click.Path(), help="Output file path")
+def outline(topic: str, requirements: Optional[str], output: Optional[str]):
+    """Generate thesis outline (生成论文大纲).
+    
+    Examples:
+        llm thesis outline "基于Transformer的文本分类研究"
+        llm thesis outline "Deep Learning for NLP" -o outline.json
+    """
+    from .thesis.agent import ThesisAgent
+    
+    try:
+        with console.status("[bold blue]Generating outline...", spinner="dots"):
+            agent = ThesisAgent()
+            outline_obj = agent.generate_outline(topic, requirements)
+        
+        console.print(f"\n[bold green]Thesis Outline:[/bold green]")
+        console.print(f"[bold]{outline_obj.title}[/bold]\n")
+        
+        for chapter in outline_obj.chapters:
+            console.print(f"[bold cyan]{chapter['number']} {chapter['title']}[/bold cyan]")
+            for section in chapter.get("sections", []):
+                console.print(f"  {section['number']} {section['title']}")
+            console.print()
+        
+        # Save to file if specified
+        if output:
+            output_path = Path(output)
+            output_data = {
+                "title": outline_obj.title,
+                "chapters": outline_obj.chapters,
+                "total_chapters": outline_obj.total_chapters,
+                "generated_at": outline_obj.generated_at if hasattr(outline_obj, 'generated_at') else None
+            }
+            output_path.write_text(json.dumps(output_data, ensure_ascii=False, indent=2), encoding="utf-8")
+            console.print(f"[green]✓ Outline saved to {output}[/green]")
+    
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        sys.exit(1)
+
+
+@thesis.command()
+@click.option("--section", "-s", required=True, help="Section ID (e.g., 1.1, 2.3)")
+@click.option("--title", "-t", required=True, help="Section title")
+@click.option("--words", "-w", type=int, default=800, help="Target word count")
+@click.option("--requirements", "-r", help="Additional requirements")
+@click.option("--output", "-o", type=click.Path(), help="Output markdown file")
+@click.option("--no-rag", is_flag=True, help="Don't use knowledge base (RAG)")
+def write(section: str, title: str, words: int, requirements: Optional[str], 
+          output: Optional[str], no_rag: bool):
+    """Write a thesis section (撰写论文章节).
+    
+    Examples:
+        llm thesis write -s 1.1 -t "研究背景" -o sections/1.1.md
+        llm thesis write -s 2.1 -t "相关工作" -w 1200 -r "重点介绍Transformer"
+    """
+    from .thesis.agent import ThesisAgent
+    
+    try:
+        with console.status(f"[bold blue]Writing section {section}...", spinner="dots"):
+            agent = ThesisAgent()
+            section_obj = agent.write_section(
+                section_id=section,
+                section_title=title,
+                target_words=words,
+                user_requirements=requirements,
+                use_rag=not no_rag
+            )
+        
+        console.print(f"\n[bold green]Section {section}: {title}[/bold green]\n")
+        console.print(Panel(Markdown(section_obj.content)))
+        
+        console.print(f"\n[dim]Word count: {section_obj.word_count}[/dim]")
+        if section_obj.citations:
+            console.print(f"[dim]Citations: {', '.join(section_obj.citations)}[/dim]")
+        
+        # Save to file if specified
+        if output:
+            agent.save_section(section, output)
+            console.print(f"\n[green]✓ Section saved to {output}[/green]")
+    
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        sys.exit(1)
+
+
+@thesis.command()
+@click.argument("output", type=click.Path())
+@click.option("--format", "-f", default="标准中国高校硕士学位论文", 
+              help="Formatting specification")
+@click.option("--title", "-t", required=True, help="Thesis title")
+@click.option("--author", "-a", required=True, help="Author name")
+@click.option("--institution", "-i", help="Institution name")
+@click.option("--advisor", help="Advisor name")
+@click.option("--date", "-d", help="Date")
+@click.option("--no-cover", is_flag=True, help="Don't include cover page")
+def export(output: str, format: str, title: str, author: str, 
+           institution: Optional[str], advisor: Optional[str], 
+           date: Optional[str], no_cover: bool):
+    """Export thesis to .docx (导出论文为Word文档).
+    
+    Examples:
+        llm thesis export thesis.docx -t "我的论文" -a "张三"
+        llm thesis export output.docx -f "北京大学硕士学位论文格式" -t "Title" -a "Author"
+    """
+    from .thesis.agent import ThesisAgent
+    
+    try:
+        agent = ThesisAgent()
+        
+        # Check if we have sections
+        if not agent.sections:
+            console.print("[yellow]No sections found. Write some sections first using 'llm thesis write'[/yellow]")
+            sys.exit(1)
+        
+        metadata = {
+            "title": title,
+            "author": author,
+        }
+        
+        if institution:
+            metadata["institution"] = institution
+        if advisor:
+            metadata["advisor"] = advisor
+        if date:
+            metadata["date"] = date
+        
+        with console.status("[bold blue]Generating document...", spinner="dots"):
+            output_path = agent.export_docx(
+                output_path=output,
+                formatting_spec=format,
+                include_cover=not no_cover,
+                **metadata
+            )
+        
+        console.print(f"[green]✓ Thesis exported to {output_path}[/green]")
+        console.print(f"\n[dim]Sections included: {len(agent.sections)}[/dim]")
+        console.print(f"[dim]References: {len(agent.citation_manager.papers)}[/dim]")
+    
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+@thesis.command()
+@click.option("--style", "-s", type=click.Choice(["GB/T7714-2015", "APA", "IEEE"]), 
+              default="GB/T7714-2015", help="Citation style")
+@click.option("--output", "-o", type=click.Path(), help="Output file")
+def citations(style: str, output: Optional[str]):
+    """Generate bibliography (生成参考文献).
+    
+    Examples:
+        llm thesis citations
+        llm thesis citations -s APA -o references.txt
+    """
+    from .thesis.agent import ThesisAgent
+    from .thesis.models import CitationStyle
+    
+    try:
+        # Map style string to enum
+        style_map = {
+            "GB/T7714-2015": CitationStyle.GB_T_7714,
+            "APA": CitationStyle.APA,
+            "IEEE": CitationStyle.IEEE
+        }
+        
+        agent = ThesisAgent(citation_style=style_map[style])
+        
+        if not agent.citation_manager.papers:
+            console.print("[yellow]No citations found[/yellow]")
+            return
+        
+        references = agent.citation_manager.generate_bibliography()
+        
+        console.print(f"\n[bold green]Bibliography ({style}):[/bold green]\n")
+        for ref in references:
+            console.print(ref)
+            console.print()
+        
+        if output:
+            Path(output).write_text("\n\n".join(references), encoding="utf-8")
+            console.print(f"[green]✓ Bibliography saved to {output}[/green]")
+    
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     main()

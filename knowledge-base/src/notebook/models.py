@@ -11,6 +11,59 @@ class NoteCreate(BaseModel):
     source_url: Optional[str] = None
 
 
+class PaperCreate(BaseModel):
+    """Create a paper entry with academic metadata."""
+    
+    # Basic info
+    title: str = Field(min_length=1, max_length=500)
+    title_cn: Optional[str] = None
+    title_en: Optional[str] = None
+    
+    # Content
+    content: str = Field(min_length=1)  # Abstract + key sections
+    abstract: Optional[str] = None
+    abstract_cn: Optional[str] = None
+    abstract_en: Optional[str] = None
+    
+    # Authors
+    authors: List[str] = Field(default_factory=list)
+    authors_cn: Optional[List[str]] = None
+    authors_en: Optional[List[str]] = None
+    
+    # Identifiers
+    doi: Optional[str] = None
+    arxiv_id: Optional[str] = None
+    semantic_scholar_id: Optional[str] = None
+    pubmed_id: Optional[str] = None
+    
+    # Publication details
+    publication_year: int
+    publication_venue: Optional[str] = None  # Journal/Conference
+    volume: Optional[str] = None
+    issue: Optional[str] = None
+    pages: Optional[str] = None
+    
+    # Metrics
+    citation_count: Optional[int] = 0
+    
+    # Citations
+    bibtex: Optional[str] = None
+    
+    # URLs
+    pdf_url: Optional[str] = None
+    source_url: Optional[str] = None
+    
+    # Language
+    language: str = "en"  # "en", "zh", "bilingual"
+    
+    # Tags for organization
+    tags: List[str] = Field(default_factory=list)
+    
+    # Additional metadata
+    keywords: List[str] = Field(default_factory=list)
+    tldr: Optional[str] = None  # Short summary
+
+
 class NoteUpdate(BaseModel):
     title: Optional[str] = Field(default=None, min_length=1, max_length=300)
     content: Optional[str] = None
