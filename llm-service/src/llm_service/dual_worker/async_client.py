@@ -16,6 +16,7 @@ from llm_service.client import Message, MessageRole, ChatResponse, APIError
 from llm_service.auth import GitHubAuthenticator
 from llm_service.dual_worker.config import ModelConfig
 from llm_service.dual_worker.models import WorkerStrategy
+from llm_service.dual_worker.debug_logger import get_debug_logger, is_debug_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,19 @@ class AsyncLLMClient:
             "temperature": temperature if temperature is not None else self.config.temperature,
         }
         
+        # Debug logging - log request
+        if is_debug_enabled():
+            debug_logger = get_debug_logger()
+            debug_logger.log_request(
+                model_name=self.config.model_name,
+                messages=messages,
+                temperature=payload["temperature"],
+                max_tokens=payload["max_tokens"],
+                request_metadata={
+                    "endpoint": self.config.api_endpoint,
+                }
+            )
+        
         # Use appropriate headers based on endpoint
         if "inference.ai.azure.com" in self.config.api_endpoint:
             # GitHub Models API - use direct token
@@ -152,19 +166,41 @@ class AsyncLLMClient:
                 f"(tokens: {token_count})"
             )
             
+            # Debug logging - log response
+            if is_debug_enabled():
+                debug_logger = get_debug_logger()
+                debug_logger.log_response(
+                    model_name=self.config.model_name,
+                    response_content=chat_response.content,
+                    execution_time=execution_time,
+                    token_usage=data.get('usage') if isinstance(data.get('usage'), dict) else None,
+                )
+            
             return chat_response
             
         except requests.exceptions.RequestException as e:
             error_msg = str(e)
+            error_details = None
             # Try to extract error details from response
             if hasattr(e, 'response') and e.response is not None:
                 try:
                     error_data = e.response.json()
                     if 'error' in error_data:
-                        error_msg = f"{error_msg}. Details: {error_data['error']}"
+                        error_details = str(error_data['error'])
+                        error_msg = f"{error_msg}. Details: {error_details}"
                 except:
                     pass
             self.logger.error(f"API request failed for {self.config.model_name}: {error_msg}")
+            
+            # Debug logging - log error
+            if is_debug_enabled():
+                debug_logger = get_debug_logger()
+                debug_logger.log_error(
+                    model_name=self.config.model_name,
+                    error_message=error_msg,
+                    error_details=error_details
+                )
+            
             raise APIError(f"Model {self.config.model_name} failed: {error_msg}")
         except (ValueError, KeyError) as e:
             self.logger.error(f"Failed to parse response from {self.config.model_name}: {str(e)}")

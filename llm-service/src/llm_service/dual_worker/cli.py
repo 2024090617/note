@@ -23,6 +23,7 @@ from llm_service.dual_worker.config import DualWorkerConfig
 from llm_service.dual_worker.planner import DualPlannerOrchestrator
 from llm_service.dual_worker.orchestrator import DualWorkerOrchestrator
 from llm_service.dual_worker.storage import create_state_store
+from llm_service.dual_worker.debug_logger import DebugMarkdownLogger, set_debug_logger
 from llm_service.dual_worker.models import (
     TaskStatus,
     ExecutionResult,
@@ -64,12 +65,18 @@ def plan(goal: str, output: Optional[str], execute: bool, debug: bool, copilot: 
     else:
         logging.basicConfig(level=logging.INFO)
     
+    # Initialize debug logger if --debug is enabled
+    debug_logger = None
+    if debug:
+        session_id = str(uuid.uuid4())[:8]
+        debug_logger = DebugMarkdownLogger(session_id)
+        set_debug_logger(debug_logger)
+        console.print(f"[dim]Debug logging enabled. Session: {session_id}[/dim]")
+    
     async def create_plan():
-        if copilot:
-            config = DualWorkerConfig.create_copilot_bridge()
-            console.print("[green]Using Copilot Bridge (GPT-5, Claude Opus 4.5)[/green]")
-        else:
-            config = DualWorkerConfig.from_env()
+        # Always use Copilot Bridge (default mode)
+        config = DualWorkerConfig.create_copilot_bridge()
+        console.print("[green]Using Copilot Bridge (GPT-5, Claude Opus 4.5)[/green]")
         planner = DualPlannerOrchestrator(config)
         
         with Progress(
@@ -84,7 +91,15 @@ def plan(goal: str, output: Optional[str], execute: bool, debug: bool, copilot: 
                 progress.update(task_progress, completed=True)
             except Exception as e:
                 console.print(f"[red]✗[/red] Planning failed: {str(e)}")
+                if debug_logger:
+                    debug_logger.finalize(summary=f"Planning failed: {str(e)}")
+                    console.print(f"\n[dim]Debug log saved to: {debug_logger.get_log_path()}[/dim]")
                 sys.exit(1)
+        
+        # Finalize debug log if enabled
+        if debug_logger:
+            debug_logger.finalize(summary=f"Plan created with {len(task_graph.tasks)} tasks")
+            console.print(f"\n[cyan]📝 Debug log saved to:[/cyan] {debug_logger.get_log_path()}\n")
         
         # Display plan
         console.print("\n[green]✓[/green] Plan created successfully!\n")
@@ -229,8 +244,9 @@ def execute(plan_file: str, session_id: Optional[str], debug: bool):
         console.print(Panel(f"[bold]{goal}[/bold]", title="Goal"))
         console.print(f"\nLoaded plan with {len(task_graph.tasks)} tasks\n")
         
-        # Execute
-        config = DualWorkerConfig.from_env()
+        # Execute with Copilot Bridge (default mode)
+        config = DualWorkerConfig.create_copilot_bridge()
+        console.print("[green]Using Copilot Bridge (GPT-5, Claude Opus 4.5)[/green]")
         sid = session_id or str(uuid.uuid4())[:8]
         
         await execute_plan_interactive(task_graph, goal, sid, config)
@@ -330,9 +346,11 @@ def config():
         dw config
     """
     try:
-        cfg = DualWorkerConfig.from_env()
+        # Show Copilot Bridge configuration (default mode)
+        cfg = DualWorkerConfig.create_copilot_bridge()
         
         console.print("[bold]Dual-Worker Configuration[/bold]\n")
+        console.print("[green]Mode: Copilot Bridge (GPT-5, Claude Opus 4.5)[/green]\n")
         
         # Model assignments
         table = Table(title="Model Assignments")
@@ -381,14 +399,20 @@ def quick(goal: str, criticality: str, debug: bool, copilot: bool):
     else:
         logging.basicConfig(level=logging.INFO)
     
+    # Initialize debug logger if --debug is enabled
+    debug_logger = None
+    if debug:
+        session_id = str(uuid.uuid4())[:8]
+        debug_logger = DebugMarkdownLogger(session_id)
+        set_debug_logger(debug_logger)
+        console.print(f"[dim]Debug logging enabled. Session: {session_id}[/dim]")
+    
     from llm_service.dual_worker.models import TaskSchema, TaskCriticality
     
     async def quick_execute():
-        if copilot:
-            config = DualWorkerConfig.create_copilot_bridge()
-            console.print("[green]Using Copilot Bridge (GPT-5, Claude Opus 4.5)[/green]")
-        else:
-            config = DualWorkerConfig.from_env()
+        # Always use Copilot Bridge (default mode)
+        config = DualWorkerConfig.create_copilot_bridge()
+        console.print("[green]Using Copilot Bridge (GPT-5, Claude Opus 4.5)[/green]")
         orchestrator = DualWorkerOrchestrator(config)
         
         # Create single task
@@ -410,6 +434,11 @@ def quick(goal: str, criticality: str, debug: bool, copilot: bool):
             
             result = await orchestrator.execute_with_retry(task)
             progress.update(task_progress, completed=True)
+        
+        # Finalize debug log if enabled
+        if debug_logger:
+            debug_logger.finalize(summary=f"Task execution {result.status.value}")
+            console.print(f"\n[cyan]📝 Debug log saved to:[/cyan] {debug_logger.get_log_path()}\n")
         
         # Display result
         console.print(f"\n[bold]Status:[/bold] {result.status.value}")
