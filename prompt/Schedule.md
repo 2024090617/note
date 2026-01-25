@@ -22,4 +22,14 @@
 - R program learning
 - Analyze survy system. more interactive experience.
 - cet
+- 
+
+# 25 Jan. 2026
+
+- Develop a assistant agent analysis
+  - Can read read document (such as conflunce page) to learn the requirments
+  - Can create file, write code and check the development enviroment
+  - Can test the code and fix the found issue.
+- CET-4 complete 1 suite of past real examination pagers
+- recall T-test and use R to test
 -

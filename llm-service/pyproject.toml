@@ -39,6 +39,7 @@ dev = [
 
 [project.scripts]
 llm = "llm_service.cli:main"
+agent = "llm_service.agent.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
