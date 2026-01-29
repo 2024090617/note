@@ -117,17 +117,19 @@ class LLMClient:
         # Try multiple API endpoints
         urls = []
         
+        # Copilot Bridge (VSCode extension) - try first if enabled
+        if self.config.use_copilot_bridge:
+            urls.append(f"{self.config.copilot_bridge_url}/chat")
+        
         # If using OpenAI key, prioritize OpenAI endpoint
         if self.use_openai:
-            urls = [
-                f"{self.config.api_base_url}/chat/completions",
-            ]
+            urls.append(f"{self.config.api_base_url}/chat/completions")
         else:
             # For GitHub tokens, try GitHub Models (free) first
-            urls = [
+            urls.extend([
                 f"{self.config.github_models_url}/chat/completions",
                 f"{self.config.copilot_api_url}/chat/completions",
-            ]
+            ])
         
         payload = {
             "model": model or self.config.model,
@@ -143,6 +145,30 @@ class LLMClient:
         for url in urls:
             try:
                 headers = self.auth.get_headers()
+                
+                # Copilot Bridge uses simpler format
+                if "127.0.0.1:19823" in url or "localhost:19823" in url:
+                    headers = {"Content-Type": "application/json"}
+                    # Bridge expects simpler payload
+                    bridge_payload = {
+                        "model": model or self.config.model,
+                        "messages": [msg.to_dict() for msg in messages],
+                    }
+                    if max_tokens:
+                        bridge_payload["max_tokens"] = max_tokens
+                    if temperature is not None:
+                        bridge_payload["temperature"] = temperature
+                    
+                    response = requests.post(
+                        url,
+                        headers=headers,
+                        json=bridge_payload,
+                        timeout=self.config.timeout,
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    return ChatResponse.from_api_response(data)
+                
                 # Add additional headers based on endpoint
                 if "githubcopilot.com" in url:
                     headers.update({

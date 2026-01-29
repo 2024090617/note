@@ -38,9 +38,19 @@ class Config(BaseModel):
         description="GitHub Models API URL (free for GitHub users)"
     )
     
+    copilot_bridge_url: str = Field(
+        default="http://127.0.0.1:19823",
+        description="VSCode Copilot Bridge URL (local server)"
+    )
+    
+    use_copilot_bridge: bool = Field(
+        default_factory=lambda: os.getenv("USE_COPILOT_BRIDGE", "true").lower() == "true",
+        description="Use VSCode Copilot Bridge instead of direct API"
+    )
+    
     # Model Configuration
     model: str = Field(
-        default="gpt-4o-mini",
+        default="gpt-4.1",
         description="Model to use for completions"
     )
     

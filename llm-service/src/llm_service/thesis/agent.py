@@ -11,6 +11,13 @@ import logging
 kb_path = Path(__file__).parent.parent.parent.parent / "knowledge-base" / "src"
 sys.path.insert(0, str(kb_path))
 
+# Skillkit for Anthropic Agent Skills
+try:
+    from skillkit import SkillManager
+    SKILLKIT_AVAILABLE = True
+except ImportError:
+    SKILLKIT_AVAILABLE = False
+
 from ..client import LLMClient
 from .. import Message, MessageRole, Config
 
@@ -85,6 +92,29 @@ class ThesisAgent:
         # Sections storage
         self.sections: Dict[str, ThesisSection] = {}
         self.outline: Optional[ThesisOutline] = None
+        
+        # Initialize skillkit for enhanced capabilities
+        self.skill_manager = None
+        self._skill_cache: Dict[str, str] = {}
+        if SKILLKIT_AVAILABLE:
+            try:
+                # Skills directory relative to llm-service root
+                skills_path = Path(__file__).parent.parent.parent.parent / ".claude" / "skills"
+                if skills_path.exists():
+                    # Use anthropic_config_dir for .claude/skills path
+                    self.skill_manager = SkillManager(
+                        anthropic_config_dir=str(skills_path.parent),  # .claude directory
+                        project_skill_dir=""  # Disable project skills
+                    )
+                    self.skill_manager.discover()
+                    available_skills = [s.name for s in self.skill_manager.list_skills()]
+                    logger.info(f"Skillkit initialized with skills: {available_skills}")
+                else:
+                    logger.debug(f"Skills directory not found: {skills_path}")
+            except Exception as e:
+                logger.warning(f"Failed to initialize skillkit: {e}")
+        else:
+            logger.debug("Skillkit not available (optional feature)")
     
     def search_papers(
         self,
@@ -459,3 +489,377 @@ class ThesisAgent:
             return text[start:end+1]
         
         return text
+    
+    def _get_skill_context(self, skill_name: str, arguments: str = "") -> Optional[str]:
+        """Get skill instructions for prompt injection.
+        
+        Args:
+            skill_name: Name of the skill to load (e.g., 'doc-coauthoring', 'docx', 'pdf')
+            arguments: Optional arguments to pass to the skill
+            
+        Returns:
+            Skill instructions as string, or None if not available
+        """
+        if not self.skill_manager:
+            return None
+        
+        # Check cache first
+        cache_key = f"{skill_name}:{arguments}"
+        if cache_key in self._skill_cache:
+            return self._skill_cache[cache_key]
+        
+        try:
+            # Invoke skill to get its full content
+            result = self.skill_manager.invoke_skill(skill_name, arguments)
+            if result:
+                self._skill_cache[cache_key] = result
+                logger.debug(f"Loaded skill context: {skill_name}")
+                return result
+        except Exception as e:
+            logger.warning(f"Failed to load skill {skill_name}: {e}")
+        
+        return None
+    
+    def list_available_skills(self) -> List[Dict[str, str]]:
+        """List all available skills from skillkit.
+        
+        Returns:
+            List of skill info dicts with name and description
+        """
+        if not self.skill_manager:
+            return []
+        
+        skills = []
+        for skill in self.skill_manager.list_skills():
+            skills.append({
+                "name": skill.name,
+                "description": skill.description
+            })
+        return skills
+    
+    def write_section_with_skill(
+        self,
+        section_id: str,
+        section_title: str,
+        target_words: int = 800,
+        user_requirements: Optional[str] = None,
+        use_rag: bool = True,
+        use_coauthoring_skill: bool = True
+    ) -> ThesisSection:
+        """Write a thesis section using doc-coauthoring skill workflow.
+        
+        This enhanced method uses the doc-coauthoring skill for a structured
+        3-stage writing process: Context Gathering → Refinement → Reader Testing.
+        
+        Args:
+            section_id: Section ID (e.g., "1.1")
+            section_title: Section title
+            target_words: Target word count
+            user_requirements: Additional requirements
+            use_rag: Whether to use knowledge base for RAG
+            use_coauthoring_skill: Whether to use doc-coauthoring skill
+            
+        Returns:
+            Generated section
+        """
+        logger.info(f"Writing section with skill: {section_id} {section_title}")
+        
+        # Get skill context for enhanced writing workflow
+        skill_context = ""
+        if use_coauthoring_skill:
+            coauthoring_skill = self._get_skill_context("doc-coauthoring")
+            if coauthoring_skill:
+                skill_context = f"""
+## Writing Workflow (from doc-coauthoring skill)
+
+Follow this structured approach for high-quality academic writing:
+
+{coauthoring_skill[:2000]}  # Truncate to fit context
+
+---
+"""
+        
+        # Get outline context
+        outline_context = ""
+        if self.outline:
+            outline_context = json.dumps(self.outline.chapters, ensure_ascii=False, indent=2)
+        
+        # Get paper context from knowledge base
+        paper_context = ""
+        if use_rag and self.kb_store:
+            search_query = f"{section_title} {user_requirements or ''}"
+            papers = self.kb_store.search(search_query, limit=5, tags=["paper", "thesis"])
+            
+            if papers:
+                context_parts = []
+                for i, paper in enumerate(papers, 1):
+                    title = paper.get("title", "Unknown")
+                    content = paper.get("content", "")[:500]
+                    score = paper.get("score", 0)
+                    context_parts.append(f"[文献{i}] {title}\n相关度: {score:.3f}\n{content}...")
+                
+                paper_context = "\n\n".join(context_parts)
+        
+        # Enhanced prompt with skill context
+        enhanced_prompt = f"""{skill_context}
+## Section Writing Task
+
+请为以下章节撰写学术论文内容:
+
+**章节编号**: {section_id}
+**章节标题**: {section_title}
+**目标字数**: {target_words}字
+
+**论文大纲上下文**:
+{outline_context or "无"}
+
+**用户要求**:
+{user_requirements or "无"}
+
+**相关文献**:
+{paper_context or "无相关文献"}
+
+请按照学术写作规范，撰写结构清晰、论证严谨的内容。如有引用文献，请使用[作者, 年份]格式标注。
+"""
+        
+        response = self.llm.simple_query(enhanced_prompt, temperature=0.7, max_tokens=2000)
+        
+        # Parse citations from content
+        citation_keys = self.citation_manager.parse_citations_from_text(response)
+        
+        # Create section
+        section = ThesisSection(
+            section_id=section_id,
+            title=section_title,
+            content=response,
+            citations=citation_keys,
+            word_count=len(response),
+            generated_at=datetime.now().isoformat(),
+            outline_context=outline_context,
+            requirements=user_requirements
+        )
+        
+        # Store section
+        self.sections[section_id] = section
+        
+        return section
+    
+    def export_docx_with_skill(
+        self,
+        output_path: str,
+        formatting_spec: str = "标准中国高校硕士学位论文",
+        include_cover: bool = True,
+        use_docx_skill: bool = True,
+        **metadata
+    ) -> str:
+        """Export thesis to .docx file with enhanced formatting using docx skill.
+        
+        This method uses the docx skill for advanced OOXML features like
+        tracked changes, comments, and professional formatting.
+        
+        Args:
+            output_path: Output file path
+            formatting_spec: Natural language formatting specification
+            include_cover: Include cover page
+            use_docx_skill: Whether to use docx skill for enhanced formatting
+            **metadata: Additional metadata (author, institution, etc.)
+            
+        Returns:
+            Path to generated file
+        """
+        # Get skill context for enhanced document generation
+        skill_guidance = ""
+        if use_docx_skill:
+            docx_skill = self._get_skill_context("docx")
+            if docx_skill:
+                skill_guidance = docx_skill[:1500]  # Truncate for context
+                logger.info("Using docx skill for enhanced document formatting")
+        
+        # Get sections in order
+        section_ids = sorted(self.sections.keys())
+        sections = [self.sections[sid] for sid in section_ids]
+        
+        # Generate bibliography
+        references = self.citation_manager.generate_bibliography()
+        
+        # Get metadata (pop to avoid duplicate keyword args)
+        title = metadata.pop("title", self.outline.title if self.outline else "论文")
+        author = metadata.pop("author", "作者")
+        
+        # If skill guidance available, enhance the formatting spec
+        if skill_guidance:
+            # Add skill-enhanced formatting hints to metadata
+            metadata["_docx_skill_guidance"] = skill_guidance
+        
+        # Create document
+        output_path = create_thesis_document(
+            sections=sections,
+            references=references,
+            formatting_spec=formatting_spec,
+            title=title,
+            author=author,
+            output_path=output_path,
+            **metadata
+        )
+        
+        return output_path
+    
+    def export_pdf(
+        self,
+        output_path: str,
+        formatting_spec: str = "标准中国高校硕士学位论文",
+        **metadata
+    ) -> str:
+        """Export thesis to PDF file using pdf skill.
+        
+        This method first exports to .docx then converts to PDF,
+        using the pdf skill for enhanced PDF handling.
+        
+        Args:
+            output_path: Output file path (should end with .pdf)
+            formatting_spec: Natural language formatting specification
+            **metadata: Additional metadata
+            
+        Returns:
+            Path to generated PDF file
+        """
+        import subprocess
+        import tempfile
+        
+        # Get PDF skill context
+        pdf_skill = self._get_skill_context("pdf")
+        if pdf_skill:
+            logger.info("Using pdf skill for enhanced PDF generation")
+        
+        # First export to docx
+        with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
+            docx_path = tmp.name
+        
+        self.export_docx_with_skill(
+            output_path=docx_path,
+            formatting_spec=formatting_spec,
+            **metadata
+        )
+        
+        # Convert to PDF using pandoc or libreoffice
+        try:
+            # Try pandoc first
+            result = subprocess.run(
+                ["pandoc", docx_path, "-o", output_path],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode == 0:
+                logger.info(f"PDF exported via pandoc: {output_path}")
+                return output_path
+        except FileNotFoundError:
+            pass
+        
+        try:
+            # Fallback to libreoffice
+            result = subprocess.run(
+                ["libreoffice", "--headless", "--convert-to", "pdf", 
+                 "--outdir", str(Path(output_path).parent), docx_path],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode == 0:
+                # LibreOffice names the file based on input
+                generated_pdf = Path(docx_path).with_suffix(".pdf")
+                if generated_pdf.exists():
+                    generated_pdf.rename(output_path)
+                logger.info(f"PDF exported via libreoffice: {output_path}")
+                return output_path
+        except FileNotFoundError:
+            pass
+        
+        raise RuntimeError(
+            "PDF conversion failed. Please install pandoc or libreoffice.\n"
+            "  - macOS: brew install pandoc\n"
+            "  - Ubuntu: apt install pandoc\n"
+            "  - Or install LibreOffice"
+        )
+    
+    def interactive_write_section(
+        self,
+        section_id: str,
+        section_title: str,
+        target_words: int = 800
+    ) -> ThesisSection:
+        """Interactive section writing using full doc-coauthoring workflow.
+        
+        This method implements the complete 3-stage doc-coauthoring workflow:
+        1. Context Gathering - Gather all relevant information
+        2. Refinement & Structure - Iteratively build the section
+        3. Reader Testing - Verify the section works for readers
+        
+        Args:
+            section_id: Section ID
+            section_title: Section title
+            target_words: Target word count
+            
+        Returns:
+            Final generated section
+        """
+        coauthoring_skill = self._get_skill_context("doc-coauthoring")
+        
+        # Stage 1: Context Gathering
+        stage1_prompt = f"""
+{coauthoring_skill[:1500] if coauthoring_skill else ""}
+
+## Stage 1: Context Gathering for Academic Section
+
+我们正在为学位论文撰写以下章节:
+- 章节编号: {section_id}
+- 章节标题: {section_title}
+- 目标字数: {target_words}
+
+请先分析这个章节需要的核心内容和结构，列出：
+1. 这个章节应该包含哪些关键论点？
+2. 需要哪些背景知识或理论基础？
+3. 应该引用哪些类型的文献？
+4. 有哪些潜在的写作难点？
+
+请以结构化的方式输出分析结果。
+"""
+        
+        context_analysis = self.llm.simple_query(stage1_prompt, temperature=0.5)
+        logger.info(f"Stage 1 complete: Context gathered for {section_id}")
+        
+        # Stage 2: Writing with RAG
+        section = self.write_section_with_skill(
+            section_id=section_id,
+            section_title=section_title,
+            target_words=target_words,
+            user_requirements=context_analysis,
+            use_rag=True,
+            use_coauthoring_skill=True
+        )
+        
+        # Stage 3: Reader Testing / Self-Review
+        stage3_prompt = f"""
+## Stage 3: Reader Testing / Self-Review
+
+请以一个"没有上下文的新读者"的视角审阅以下学术内容:
+
+{section.content}
+
+请检查:
+1. 内容是否清晰易懂？
+2. 逻辑是否连贯？
+3. 是否有未解释的术语或概念？
+4. 论证是否充分？
+5. 引用是否恰当？
+
+如果发现问题，请指出具体位置和改进建议。
+"""
+        
+        review_feedback = self.llm.simple_query(stage3_prompt, temperature=0.3)
+        
+        # If significant issues found, refine the section
+        if any(word in review_feedback.lower() for word in ["问题", "建议", "改进", "不清晰", "缺少"]):
+            logger.info(f"Stage 3: Issues found, refining section {section_id}")
+            section = self.refine_section(section_id, review_feedback)
+        
+        logger.info(f"Interactive writing complete for section {section_id}")
+        return section
