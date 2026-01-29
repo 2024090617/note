@@ -1,0 +1,93 @@
+{
+  "checks": [
+    {
+      "name": "payment-kafka-lag",
+      "service": "kafka",
+      "tool": "check_kafka_lag",
+      "arguments": {
+        "consumer_group": "payment-processor",
+        "topics": ["payment-events", "payment-notifications"]
+      },
+      "interval_seconds": 60,
+      "thresholds": [
+        {
+          "metric_name": "total_lag",
+          "warning": 100,
+          "critical": 1000,
+          "comparison": ">"
+        }
+      ]
+    },
+    {
+      "name": "api-error-rate",
+      "service": "splunk",
+      "tool": "get_splunk_error_rate",
+      "arguments": {
+        "index": "main",
+        "service_name": "payment-api",
+        "time_range": "-15m"
+      },
+      "interval_seconds": 300,
+      "thresholds": [
+        {
+          "metric_name": "error_rate",
+          "warning": 1.0,
+          "critical": 5.0,
+          "comparison": ">"
+        }
+      ]
+    },
+    {
+      "name": "payment-jvm-health",
+      "service": "appdynamics",
+      "tool": "get_jvm_metrics",
+      "arguments": {
+        "application": "PaymentService",
+        "tier": "payment-api"
+      },
+      "interval_seconds": 120,
+      "thresholds": [
+        {
+          "metric_name": "heap_used_percentage",
+          "warning": 80,
+          "critical": 95,
+          "comparison": ">"
+        },
+        {
+          "metric_name": "gc_time_percentage",
+          "warning": 10,
+          "critical": 25,
+          "comparison": ">"
+        }
+      ]
+    },
+    {
+      "name": "mongodb-health",
+      "service": "mongodb",
+      "tool": "get_mongodb_status",
+      "arguments": {},
+      "interval_seconds": 60,
+      "thresholds": [
+        {
+          "metric_name": "connections_current",
+          "warning": 500,
+          "critical": 900,
+          "comparison": ">"
+        }
+      ]
+    }
+  ],
+  "teams": {
+    "webhook_url": "https://your-org.webhook.office.com/webhookb2/...",
+    "min_severity": "warning",
+    "rate_limit_seconds": 300
+  },
+  "database": {
+    "sqlite_path": "./monitoring.db",
+    "retention_days": 30
+  },
+  "mcp": {
+    "command": "python -m monitoring_mcp",
+    "timeout_seconds": 30
+  }
+}
