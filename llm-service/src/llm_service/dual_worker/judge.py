@@ -3,6 +3,8 @@ Judge implementation for evaluating worker outputs.
 
 The judge compares two worker outputs and makes a decision on which to accept,
 or whether to reject both and escalate to human.
+
+Supports both code generation and common tasks (writing, analysis, planning, etc.)
 """
 
 import json
@@ -15,12 +17,13 @@ from llm_service.dual_worker.async_client import AsyncLLMClient
 from llm_service.dual_worker.config import ModelConfig
 from llm_service.dual_worker.models import (
     TaskSchema,
+    TaskType,
     WorkerResponse,
     JudgeDecision,
     JudgeVerdict,
     JudgeCriteria,
 )
-from llm_service.dual_worker.prompts import JUDGE_EVALUATION_PROMPT
+from llm_service.dual_worker.prompts import JUDGE_EVALUATION_PROMPT, get_judge_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +57,7 @@ class Judge:
         worker_b: WorkerResponse,
     ) -> str:
         """
-        Build evaluation prompt for judge.
+        Build evaluation prompt for judge based on task type.
         
         Args:
             task: Original task
@@ -64,15 +67,33 @@ class Judge:
         Returns:
             Formatted prompt
         """
-        return JUDGE_EVALUATION_PROMPT.format(
-            task_description=task.description,
-            worker_a_model=worker_a.model_name,
-            worker_a_strategy=worker_a.strategy.value,
-            worker_a_output=worker_a.output,
-            worker_b_model=worker_b.model_name,
-            worker_b_strategy=worker_b.strategy.value,
-            worker_b_output=worker_b.output,
-        )
+        # Get task-type-aware judge prompt
+        task_type = task.task_type.value if hasattr(task, 'task_type') else "code"
+        prompt_template = get_judge_prompt(task_type)
+        
+        # Build format kwargs
+        format_kwargs = {
+            "task_description": task.description,
+            "worker_a_model": worker_a.model_name,
+            "worker_a_strategy": worker_a.strategy.value,
+            "worker_a_output": worker_a.output,
+            "worker_b_model": worker_b.model_name,
+            "worker_b_strategy": worker_b.strategy.value,
+            "worker_b_output": worker_b.output,
+        }
+        
+        # Add optional fields for non-code tasks
+        if hasattr(task, 'audience') and task.audience:
+            format_kwargs["audience"] = task.audience
+        else:
+            format_kwargs["audience"] = "general audience"
+        
+        if hasattr(task, 'tone') and task.tone:
+            format_kwargs["tone"] = task.tone
+        else:
+            format_kwargs["tone"] = "professional"
+        
+        return prompt_template.format(**format_kwargs)
     
     def _parse_judge_response(self, content: str) -> dict:
         """
@@ -135,6 +156,70 @@ class Judge:
         
         raise ValueError(f"Invalid verdict: {verdict}")
     
+    def _normalize_scores(self, scores: dict) -> dict:
+        """
+        Normalize score field names from different task types to JudgeCriteria fields.
+        
+        Maps task-specific criteria to standard JudgeCriteria fields:
+        - correctness, completeness (universal)
+        - edge_cases, security, code_quality, performance (code-specific)
+        - clarity, structure, accuracy, relevance (common task-specific)
+        
+        Args:
+            scores: Raw scores dict from judge response
+            
+        Returns:
+            Normalized dict matching JudgeCriteria fields
+        """
+        # Field mappings from various prompts to JudgeCriteria
+        field_mappings = {
+            # Direct mappings (already correct)
+            "correctness": "correctness",
+            "completeness": "completeness",
+            "edge_cases": "edge_cases",
+            "security": "security",
+            "code_quality": "code_quality",
+            "performance": "performance",
+            "clarity": "clarity",
+            "structure": "structure",
+            "accuracy": "accuracy",
+            "relevance": "relevance",
+            # Alternative names from different prompts
+            "feasibility": "correctness",      # Planning: feasibility -> correctness
+            "strategic_soundness": "accuracy", # Planning: strategy -> accuracy
+            "risk_management": "security",     # Planning: risk -> security
+            "actionability": "relevance",      # Analysis: actionability -> relevance
+            "rigor": "edge_cases",             # Analysis: rigor -> edge_cases
+            "engagement": "relevance",         # Writing: engagement -> relevance
+        }
+        
+        normalized = {}
+        for key, value in scores.items():
+            mapped_key = field_mappings.get(key, key)
+            # Only use first mapping if multiple map to same field
+            if mapped_key not in normalized:
+                normalized[mapped_key] = value
+        
+        # Ensure all required fields have defaults
+        defaults = {
+            "correctness": 80.0,
+            "completeness": 80.0,
+            "edge_cases": 80.0,
+            "security": 80.0,
+            "code_quality": 80.0,
+            "performance": 80.0,
+            "clarity": 80.0,
+            "structure": 80.0,
+            "accuracy": 80.0,
+            "relevance": 80.0,
+        }
+        
+        for field, default_val in defaults.items():
+            if field not in normalized:
+                normalized[field] = default_val
+        
+        return normalized
+
     async def evaluate(
         self,
         task: TaskSchema,
@@ -214,8 +299,15 @@ class Judge:
             verdict = self._validate_and_normalize_verdict(parsed["verdict"])
             confidence = float(parsed["confidence"])
             
-            worker_a_scores = JudgeCriteria(**parsed["worker_a_scores"])
-            worker_b_scores = JudgeCriteria(**parsed["worker_b_scores"])
+            # Normalize scores to match JudgeCriteria fields
+            worker_a_raw = parsed["worker_a_scores"]
+            worker_b_raw = parsed["worker_b_scores"]
+            
+            worker_a_normalized = self._normalize_scores(worker_a_raw)
+            worker_b_normalized = self._normalize_scores(worker_b_raw)
+            
+            worker_a_scores = JudgeCriteria(**worker_a_normalized)
+            worker_b_scores = JudgeCriteria(**worker_b_normalized)
             
             reasoning = parsed.get("reasoning", "")
             concerns = parsed.get("concerns", [])
@@ -273,9 +365,12 @@ class Judge:
             execution_time_seconds=execution_time,
         )
         
+        # Get task type for weighted scoring
+        task_type_str = task.task_type.value if hasattr(task.task_type, 'value') else str(task.task_type)
+        
         self.logger.info(
             f"Judge decision: {verdict.value} (confidence: {confidence:.2f}, "
-            f"scores: A={worker_a_scores.total:.1f} B={worker_b_scores.total:.1f})"
+            f"scores: A={worker_a_scores.total(task_type_str):.1f} B={worker_b_scores.total(task_type_str):.1f})"
         )
         
         return decision
@@ -285,6 +380,7 @@ class Judge:
         decision: JudgeDecision,
         auto_escalate_threshold: float = 0.6,
         rejection_threshold: float = 85.0,
+        task_type: str = "code",
     ) -> tuple[bool, Optional[str]]:
         """
         Determine if decision should be escalated to human.
@@ -293,6 +389,7 @@ class Judge:
             decision: Judge's decision
             auto_escalate_threshold: Confidence threshold for auto-escalation
             rejection_threshold: Score threshold for acceptance
+            task_type: Task type for weighted scoring
             
         Returns:
             Tuple of (should_escalate, reason)
@@ -307,14 +404,19 @@ class Judge:
         
         # Escalate if winner score is below threshold
         if decision.verdict == JudgeVerdict.ACCEPT_A:
-            if decision.worker_a_scores.total < rejection_threshold:
-                return True, f"Winner score too low: {decision.worker_a_scores.total:.1f}"
+            score_a = decision.worker_a_scores.total(task_type)
+            if score_a < rejection_threshold:
+                return True, f"Winner score too low: {score_a:.1f}"
         elif decision.verdict == JudgeVerdict.ACCEPT_B:
-            if decision.worker_b_scores.total < rejection_threshold:
-                return True, f"Winner score too low: {decision.worker_b_scores.total:.1f}"
+            score_b = decision.worker_b_scores.total(task_type)
+            if score_b < rejection_threshold:
+                return True, f"Winner score too low: {score_b:.1f}"
         
         # Escalate if scores are very close (hard to decide)
-        score_diff = abs(decision.worker_a_scores.total - decision.worker_b_scores.total)
+        score_diff = abs(
+            decision.worker_a_scores.total(task_type) - 
+            decision.worker_b_scores.total(task_type)
+        )
         if score_diff < 5.0:
             return True, f"Scores too close to call: {score_diff:.1f} points difference"
         

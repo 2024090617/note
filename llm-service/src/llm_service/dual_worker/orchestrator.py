@@ -15,13 +15,14 @@ from llm_service.dual_worker.models import (
     TaskSchema,
     TaskStatus,
     TaskCriticality,
+    TaskType,
     WorkerResponse,
     JudgeDecision,
     JudgeVerdict,
     ExecutionResult,
     TaskGraph,
 )
-from llm_service.dual_worker.worker import Worker, create_dual_workers
+from llm_service.dual_worker.worker import Worker, create_dual_workers, get_worker_strategies_for_task_type
 from llm_service.dual_worker.judge import Judge
 
 logger = logging.getLogger(__name__)
@@ -59,11 +60,14 @@ class DualWorkerOrchestrator:
         # Import ModelRole here to avoid circular dependency
         from llm_service.dual_worker.config import ModelRole
         
-        # Create workers
-        worker_1_config, worker_2_config = self.config.get_worker_configs()
+        # Store worker configs for creating task-type-specific workers
+        self.worker_1_config, self.worker_2_config = self.config.get_worker_configs()
+        
+        # Create default workers (for CODE tasks - backward compatibility)
         self.worker_1, self.worker_2 = create_dual_workers(
-            worker_1_config,
-            worker_2_config,
+            self.worker_1_config,
+            self.worker_2_config,
+            task_type=TaskType.CODE,  # Default to code for backward compatibility
         )
         
         # Create judges
@@ -78,6 +82,23 @@ class DualWorkerOrchestrator:
         self.execution_history: List[ExecutionResult] = []
         
         self.logger = logging.getLogger(__name__)
+    
+    def _create_workers_for_task(self, task: TaskSchema) -> tuple[Worker, Worker]:
+        """
+        Create workers with strategies appropriate for the task type.
+        
+        Args:
+            task: Task to create workers for
+            
+        Returns:
+            Tuple of (worker_1, worker_2) with appropriate strategies
+        """
+        task_type = task.task_type or TaskType.CODE
+        return create_dual_workers(
+            self.worker_1_config,
+            self.worker_2_config,
+            task_type=task_type,
+        )
     
     def _get_judge_for_task(self, task: TaskSchema) -> Judge:
         """Select appropriate judge based on task criticality"""
@@ -175,17 +196,20 @@ class DualWorkerOrchestrator:
             ExecutionResult
         """
         self.logger.info(
-            f"Executing task {task.task_id} with dual workers + "
+            f"Executing task {task.task_id} (type={task.task_type or 'code'}) with dual workers + "
             f"{'premium' if task.criticality == TaskCriticality.CRITICAL else 'standard'} judge"
         )
         
         start_time = datetime.now()
         
+        # Create workers with strategies appropriate for this task type
+        worker_1, worker_2 = self._create_workers_for_task(task)
+        
         try:
             # Execute both workers in parallel
             if self.config.enable_parallel_workers:
-                worker_1_task = self.worker_1.execute(task, retry_feedback)
-                worker_2_task = self.worker_2.execute(task, retry_feedback)
+                worker_1_task = worker_1.execute(task, retry_feedback)
+                worker_2_task = worker_2.execute(task, retry_feedback)
                 
                 worker_1_response, worker_2_response = await asyncio.gather(
                     worker_1_task,
@@ -193,12 +217,12 @@ class DualWorkerOrchestrator:
                 )
             else:
                 # Sequential execution (for debugging or rate limit management)
-                worker_1_response = await self.worker_1.execute(task, retry_feedback)
-                worker_2_response = await self.worker_2.execute(task, retry_feedback)
+                worker_1_response = await worker_1.execute(task, retry_feedback)
+                worker_2_response = await worker_2.execute(task, retry_feedback)
             
             # Run verification on both outputs
-            verify_1_task = self.worker_1.verify_output(worker_1_response.output, task)
-            verify_2_task = self.worker_2.verify_output(worker_2_response.output, task)
+            verify_1_task = worker_1.verify_output(worker_1_response.output, task)
+            verify_2_task = worker_2.verify_output(worker_2_response.output, task)
             
             verify_1, verify_2 = await asyncio.gather(verify_1_task, verify_2_task)
             
@@ -243,10 +267,12 @@ class DualWorkerOrchestrator:
             
             # Check if should escalate despite acceptance
             if not escalated:
+                task_type_str = task.task_type.value if hasattr(task.task_type, 'value') else str(task.task_type)
                 should_escalate, reason = judge.should_escalate(
                     decision,
                     self.config.auto_escalate_threshold,
                     self.config.rejection_threshold,
+                    task_type=task_type_str,
                 )
                 if should_escalate:
                     final_status = TaskStatus.ESCALATED

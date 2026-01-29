@@ -2,6 +2,7 @@
 Worker implementation for task execution.
 
 Workers execute atomic tasks using specific strategies and models.
+Supports both code generation and common tasks (writing, analysis, planning, etc.)
 """
 
 import logging
@@ -13,6 +14,7 @@ from llm_service.dual_worker.async_client import AsyncLLMClient
 from llm_service.dual_worker.config import ModelConfig
 from llm_service.dual_worker.models import (
     TaskSchema,
+    TaskType,
     WorkerResponse,
     WorkerStrategy,
 )
@@ -22,6 +24,7 @@ from llm_service.dual_worker.prompts import (
     WORKER_PERFORMANCE_FIRST_PROMPT,
     WORKER_COMPREHENSIVE_PROMPT,
     WORKER_RETRY_PROMPT,
+    get_worker_prompt,
 )
 
 logger = logging.getLogger(__name__)
@@ -57,19 +60,16 @@ class Worker:
         self.client = AsyncLLMClient(model_config)
         self.logger = logging.getLogger(f"{__name__}.{worker_id}")
     
-    def _get_prompt_template(self, is_retry: bool = False) -> str:
-        """Get prompt template based on strategy"""
+    def _get_prompt_template(self, task: TaskSchema, is_retry: bool = False) -> str:
+        """Get prompt template based on task type and strategy"""
         if is_retry:
             return WORKER_RETRY_PROMPT
         
-        strategy_prompts = {
-            WorkerStrategy.PRAGMATIC: WORKER_PRAGMATIC_PROMPT,
-            WorkerStrategy.SECURITY_FIRST: WORKER_SECURITY_FIRST_PROMPT,
-            WorkerStrategy.PERFORMANCE_FIRST: WORKER_PERFORMANCE_FIRST_PROMPT,
-            WorkerStrategy.COMPREHENSIVE: WORKER_COMPREHENSIVE_PROMPT,
-        }
+        # Use task-type-aware prompt selector
+        task_type = task.task_type.value if hasattr(task, 'task_type') else "code"
+        strategy = self.strategy.value
         
-        return strategy_prompts.get(self.strategy, WORKER_PRAGMATIC_PROMPT)
+        return get_worker_prompt(task_type, strategy)
     
     def _format_task_input(self, task: TaskSchema) -> str:
         """Format task input as readable text"""
@@ -104,8 +104,23 @@ class Worker:
         Returns:
             List of messages
         """
-        # System message defines the worker's role
-        system_content = f"You are an AI worker executing tasks with a {self.strategy.value} approach."
+        # System message defines the worker's role based on task type
+        task_type = task.task_type.value if hasattr(task, 'task_type') else "code"
+        
+        role_descriptions = {
+            "code": "a skilled software developer",
+            "writing": "a professional technical writer",
+            "analysis": "an expert analyst",
+            "planning": "a strategic project planner",
+            "qa": "a knowledgeable expert",
+            "translation": "a skilled translator",
+            "creative": "a creative content creator",
+            "review": "a thorough reviewer",
+            "general": "a capable assistant",
+        }
+        role = role_descriptions.get(task_type, "a capable assistant")
+        
+        system_content = f"You are {role} executing tasks with a {self.strategy.value} approach."
         
         # User message contains the task
         if retry_feedback:
@@ -119,14 +134,29 @@ class Worker:
                 judge_recommendation=retry_feedback.get("recommendation", "Address the concerns above"),
             )
         else:
-            # First attempt
-            template = self._get_prompt_template()
-            user_content = template.format(
-                task_description=task.description,
-                task_input=self._format_task_input(task),
-                task_constraints=self._format_constraints(task),
-                task_output=task.output,
-            )
+            # First attempt - use task-type-aware template
+            template = self._get_prompt_template(task)
+            
+            # Build format kwargs based on task type
+            format_kwargs = {
+                "task_description": task.description,
+                "task_input": self._format_task_input(task),
+                "task_constraints": self._format_constraints(task),
+                "task_output": task.output,
+            }
+            
+            # Add optional fields for non-code tasks
+            if hasattr(task, 'audience') and task.audience:
+                format_kwargs["audience"] = task.audience
+            else:
+                format_kwargs["audience"] = "general audience"
+            
+            if hasattr(task, 'tone') and task.tone:
+                format_kwargs["tone"] = task.tone
+            else:
+                format_kwargs["tone"] = "professional"
+            
+            user_content = template.format(**format_kwargs)
         
         return [
             Message(role=MessageRole.SYSTEM, content=system_content),
@@ -243,30 +273,66 @@ class Worker:
         return results
 
 
+def get_worker_strategies_for_task_type(task_type: TaskType) -> tuple[WorkerStrategy, WorkerStrategy]:
+    """
+    Get appropriate worker strategies based on task type.
+    
+    Different task types benefit from different evaluation perspectives:
+    - Code tasks: pragmatic vs security_first (focuses on edge cases, vulnerabilities)
+    - Writing/Creative: pragmatic vs comprehensive (focuses on depth, polish)
+    - Analysis/Planning: pragmatic vs comprehensive (focuses on thoroughness)
+    - QA/Review: pragmatic vs security_first (focuses on finding issues)
+    
+    Args:
+        task_type: The type of task being executed
+        
+    Returns:
+        Tuple of (worker_1_strategy, worker_2_strategy)
+    """
+    # Code and review tasks benefit from security-focused second opinion
+    code_like_tasks = {TaskType.CODE, TaskType.REVIEW, TaskType.QA}
+    
+    if task_type in code_like_tasks:
+        return WorkerStrategy.PRAGMATIC, WorkerStrategy.SECURITY_FIRST
+    else:
+        # Writing, analysis, planning, translation, creative, general
+        # Benefit from comprehensive second opinion
+        return WorkerStrategy.PRAGMATIC, WorkerStrategy.COMPREHENSIVE
+
+
 def create_dual_workers(
     pragmatic_config: ModelConfig,
     reasoning_config: ModelConfig,
+    task_type: TaskType = TaskType.CODE,
 ) -> tuple["Worker", "Worker"]:
     """
-    Create two workers with complementary strategies.
+    Create two workers with complementary strategies based on task type.
     
     Args:
         pragmatic_config: Config for pragmatic worker
         reasoning_config: Config for reasoning worker
+        task_type: Type of task to determine strategy selection
         
     Returns:
-        Tuple of (worker_1_pragmatic, worker_2_reasoning)
+        Tuple of (worker_1, worker_2)
     """
+    strategy_1, strategy_2 = get_worker_strategies_for_task_type(task_type)
+    
     worker_1 = Worker(
         worker_id="worker_1",
         model_config=pragmatic_config,
-        strategy=WorkerStrategy.PRAGMATIC,
+        strategy=strategy_1,
     )
     
     worker_2 = Worker(
         worker_id="worker_2",
         model_config=reasoning_config,
-        strategy=WorkerStrategy.SECURITY_FIRST,  # Reasoning model focuses on edge cases
+        strategy=strategy_2,
+    )
+    
+    logger.info(
+        f"Created workers for task_type={task_type.value}: "
+        f"worker_1={strategy_1.value}, worker_2={strategy_2.value}"
     )
     
     return worker_1, worker_2

@@ -21,6 +21,19 @@ class TaskStatus(str, Enum):
     ESCALATED = "escalated"
 
 
+class TaskType(str, Enum):
+    """Task type - determines worker behavior and evaluation criteria"""
+    CODE = "code"              # Programming tasks - code generation, debugging
+    WRITING = "writing"        # Documentation, articles, reports
+    ANALYSIS = "analysis"      # Data analysis, research, investigation
+    PLANNING = "planning"      # Project planning, roadmaps, strategies
+    TRANSLATION = "translation" # Language translation, format conversion
+    REVIEW = "review"          # Code review, document review, feedback
+    QA = "qa"                  # Question answering, knowledge retrieval
+    CREATIVE = "creative"      # Creative writing, brainstorming, ideation
+    GENERAL = "general"        # General purpose tasks
+
+
 class TaskCriticality(str, Enum):
     """Task criticality level - determines worker/judge routing"""
     SIMPLE = "simple"          # Single worker, no judge
@@ -35,6 +48,8 @@ class TaskSchema(BaseModel):
     
     Follows the principle: "A task is atomic for AI if it has one clear input,
     one measurable output, can be verified automatically, and requires no hidden context."
+    
+    Supports both code generation and common tasks (writing, analysis, planning, etc.)
     """
     task_id: str = Field(..., description="Unique task identifier (e.g., T-001)")
     description: str = Field(..., description="Clear, actionable task description")
@@ -43,10 +58,17 @@ class TaskSchema(BaseModel):
     constraints: List[str] = Field(default_factory=list, description="Task constraints and requirements")
     dependencies: List[str] = Field(default_factory=list, description="Task IDs that must complete first")
     criticality: TaskCriticality = Field(default=TaskCriticality.STANDARD, description="Task importance level")
-    estimated_lines: int = Field(default=50, description="Estimated code lines", ge=1)
+    task_type: TaskType = Field(default=TaskType.CODE, description="Task type (code, writing, analysis, etc.)")
+    estimated_lines: int = Field(default=50, description="Estimated output lines/words", ge=1)
     verification: str = Field(..., description="How to verify correctness")
     status: TaskStatus = Field(default=TaskStatus.PENDING, description="Current status")
     created_at: datetime = Field(default_factory=datetime.now)
+    
+    # Task-type specific fields
+    language: Optional[str] = Field(default=None, description="Programming language (for code) or natural language (for writing)")
+    format: Optional[str] = Field(default=None, description="Output format (markdown, json, code, etc.)")
+    audience: Optional[str] = Field(default=None, description="Target audience (for writing tasks)")
+    tone: Optional[str] = Field(default=None, description="Tone/style (formal, casual, technical)")
     
     # Execution tracking
     attempts: int = Field(default=0, description="Number of execution attempts")
@@ -91,33 +113,100 @@ class JudgeVerdict(str, Enum):
 
 
 class JudgeCriteria(BaseModel):
-    """Evaluation criteria scores"""
-    correctness: float = Field(..., ge=0, le=100, description="Does it work correctly?")
-    edge_cases: float = Field(..., ge=0, le=100, description="Handles errors/edge cases?")
-    security: float = Field(..., ge=0, le=100, description="Security considerations?")
-    code_quality: float = Field(..., ge=0, le=100, description="Readable/maintainable?")
-    performance: float = Field(..., ge=0, le=100, description="Efficient implementation?")
+    """
+    Evaluation criteria scores - adapts weights based on task type.
+    
+    For code tasks: correctness, edge_cases, security weighted higher
+    For writing tasks: clarity, structure, accuracy weighted higher
+    """
+    # Universal criteria
+    correctness: float = Field(..., ge=0, le=100, description="Does it solve the problem correctly?")
     completeness: float = Field(..., ge=0, le=100, description="Meets all requirements?")
     
-    @property
-    def total(self) -> float:
-        """Weighted total score"""
-        weights = {
-            "correctness": 0.30,
-            "edge_cases": 0.20,
-            "security": 0.20,
-            "code_quality": 0.15,
-            "performance": 0.10,
-            "completeness": 0.05,
-        }
-        return (
-            self.correctness * weights["correctness"] +
-            self.edge_cases * weights["edge_cases"] +
-            self.security * weights["security"] +
-            self.code_quality * weights["code_quality"] +
-            self.performance * weights["performance"] +
-            self.completeness * weights["completeness"]
-        )
+    # Code-specific criteria (also used for general quality)
+    edge_cases: float = Field(default=80.0, ge=0, le=100, description="Handles errors/edge cases?")
+    security: float = Field(default=80.0, ge=0, le=100, description="Security considerations?")
+    code_quality: float = Field(default=80.0, ge=0, le=100, description="Code quality/readability?")
+    performance: float = Field(default=80.0, ge=0, le=100, description="Efficient implementation?")
+    
+    # Writing/common task criteria
+    clarity: float = Field(default=80.0, ge=0, le=100, description="Clear and understandable?")
+    structure: float = Field(default=80.0, ge=0, le=100, description="Well organized/structured?")
+    accuracy: float = Field(default=80.0, ge=0, le=100, description="Factually accurate?")
+    relevance: float = Field(default=80.0, ge=0, le=100, description="Relevant to the task?")
+    
+    def total(self, task_type: str = "code") -> float:
+        """Weighted total score based on task type"""
+        if task_type in ["code", "review"]:
+            # Code-focused weights
+            weights = {
+                "correctness": 0.30,
+                "edge_cases": 0.20,
+                "security": 0.15,
+                "code_quality": 0.15,
+                "performance": 0.10,
+                "completeness": 0.10,
+            }
+            return (
+                self.correctness * weights["correctness"] +
+                self.edge_cases * weights["edge_cases"] +
+                self.security * weights["security"] +
+                self.code_quality * weights["code_quality"] +
+                self.performance * weights["performance"] +
+                self.completeness * weights["completeness"]
+            )
+        elif task_type in ["writing", "creative", "translation"]:
+            # Writing-focused weights
+            weights = {
+                "correctness": 0.20,
+                "clarity": 0.25,
+                "structure": 0.20,
+                "accuracy": 0.15,
+                "relevance": 0.10,
+                "completeness": 0.10,
+            }
+            return (
+                self.correctness * weights["correctness"] +
+                self.clarity * weights["clarity"] +
+                self.structure * weights["structure"] +
+                self.accuracy * weights["accuracy"] +
+                self.relevance * weights["relevance"] +
+                self.completeness * weights["completeness"]
+            )
+        elif task_type in ["analysis", "qa", "planning"]:
+            # Analysis-focused weights
+            weights = {
+                "correctness": 0.25,
+                "accuracy": 0.25,
+                "completeness": 0.20,
+                "clarity": 0.15,
+                "relevance": 0.15,
+            }
+            return (
+                self.correctness * weights["correctness"] +
+                self.accuracy * weights["accuracy"] +
+                self.completeness * weights["completeness"] +
+                self.clarity * weights["clarity"] +
+                self.relevance * weights["relevance"]
+            )
+        else:
+            # General/balanced weights
+            weights = {
+                "correctness": 0.25,
+                "completeness": 0.20,
+                "clarity": 0.20,
+                "accuracy": 0.15,
+                "relevance": 0.10,
+                "structure": 0.10,
+            }
+            return (
+                self.correctness * weights["correctness"] +
+                self.completeness * weights["completeness"] +
+                self.clarity * weights["clarity"] +
+                self.accuracy * weights["accuracy"] +
+                self.relevance * weights["relevance"] +
+                self.structure * weights["structure"]
+            )
 
 
 class JudgeDecision(BaseModel):
@@ -169,14 +258,16 @@ class ExecutionResult(BaseModel):
 
 
 class PlanTask(BaseModel):
-    """Task definition for planning phase"""
+    """Task definition for planning phase - supports both code and common tasks"""
     id: str = Field(..., description="Task ID (T1, T2, etc.)")
     description: str = Field(..., description="Task description")
     input: str = Field(..., description="What it needs")
     output: str = Field(..., description="What it produces")
-    estimated_lines: int = Field(..., description="Estimated LOC")
+    estimated_lines: int = Field(default=50, description="Estimated output size (LOC or words)")
     dependencies: List[str] = Field(default_factory=list, description="Dependency task IDs")
     criticality: TaskCriticality = Field(default=TaskCriticality.STANDARD)
+    task_type: TaskType = Field(default=TaskType.GENERAL, description="Task type")
+    format: Optional[str] = Field(default=None, description="Output format")
 
 
 class TaskGraph(BaseModel):

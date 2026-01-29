@@ -383,14 +383,19 @@ def config():
 @cli.command()
 @click.argument("goal")
 @click.option("--criticality", "-c", type=click.Choice(["simple", "standard", "important", "critical"]), default="standard")
+@click.option("--task-type", "-t", type=click.Choice(["code", "writing", "analysis", "planning", "qa", "translation", "creative", "review", "general"]), default="general", help="Task type for specialized prompts")
 @click.option("--debug", is_flag=True, help="Enable debug logging")
 @click.option("--copilot", is_flag=True, help="Use Copilot Bridge for premium models (GPT-5, Claude Opus)")
-def quick(goal: str, criticality: str, debug: bool, copilot: bool):
+def quick(goal: str, criticality: str, task_type: str, debug: bool, copilot: bool):
     """
     Quick single-task execution (no planning).
     
     Example:
         dw quick "Write a function to validate email addresses" -c important
+        dw quick "Write a project status report" -t writing -c standard
+        dw quick "Analyze the Q4 sales data" -t analysis
+        dw quick "Create a roadmap for v2.0 release" -t planning
+        dw quick "Translate this document to Chinese" -t translation
         dw quick "Complex task" --copilot  # Use GPT-5, Claude Opus via Copilot
     """
     import logging
@@ -407,15 +412,16 @@ def quick(goal: str, criticality: str, debug: bool, copilot: bool):
         set_debug_logger(debug_logger)
         console.print(f"[dim]Debug logging enabled. Session: {session_id}[/dim]")
     
-    from llm_service.dual_worker.models import TaskSchema, TaskCriticality
+    from llm_service.dual_worker.models import TaskSchema, TaskCriticality, TaskType
     
     async def quick_execute():
         # Always use Copilot Bridge (default mode)
         config = DualWorkerConfig.create_copilot_bridge()
         console.print("[green]Using Copilot Bridge (GPT-5, Claude Opus 4.5)[/green]")
+        console.print(f"[dim]Task type: {task_type}[/dim]")
         orchestrator = DualWorkerOrchestrator(config)
         
-        # Create single task
+        # Create single task with task type
         task = TaskSchema(
             task_id="Q1",
             description=goal,
@@ -423,6 +429,7 @@ def quick(goal: str, criticality: str, debug: bool, copilot: bool):
             output="Implementation that fulfills the goal",
             verification="Automated verification",
             criticality=TaskCriticality(criticality),
+            task_type=TaskType(task_type),
         )
         
         with Progress(
