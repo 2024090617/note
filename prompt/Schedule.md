@@ -32,4 +32,10 @@
   - Can test the code and fix the found issue.
 - CET-4 complete 1 suite of past real examination pagers
 - recall T-test and use R to test
--
+- 
+
+# 1 Feb. 2026
+
+- Enhance the Monitor Agent
+  - Analyze JVM issue by LLM
+  - Write a
