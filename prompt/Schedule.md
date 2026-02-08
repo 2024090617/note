@@ -39,3 +39,10 @@
 - Enhance the Monitor Agent
   - Analyze JVM issue by LLM
   - Write a
+
+
+# 10 Feb. 2026
+
+- Agent memory investigation
+- CET-4
+-

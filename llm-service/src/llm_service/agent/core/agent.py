@@ -1,130 +1,24 @@
-"""
-Core Agent - ReAct-style autonomous developer agent.
-
-Implements the main agent loop: Reason → Act → Observe → Repeat
-"""
+"""Agent class - ReAct-style autonomous developer agent."""
 
 import json
 import re
 import time
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Callable
-from dataclasses import dataclass, field
-from enum import Enum
 
-from .copilot_client import CopilotBridgeClient, ChatMessage, CopilotBridgeError
-from .session import Session, SessionState, Action, ActionType
-from .tools import ToolRegistry, ToolResult
-from .logger import AgentLogger, get_logger, LogLevel
+from ..copilot_client import CopilotBridgeClient, ChatMessage, CopilotBridgeError
+from ..session import Session, SessionState, Action, ActionType
+from ..tools import ToolRegistry, ToolResult
+from ..logger import AgentLogger, LogLevel
 
-
-# System prompt for the developer agent
-DEVELOPER_AGENT_SYSTEM_PROMPT = """You are an expert software developer agent. You help users by:
-- Understanding requirements from documents and descriptions
-- Creating and modifying code files
-- Running tests and fixing issues
-- Following best practices for the relevant tech stack
-
-## Operating Principles
-- Be explicit about goals, constraints, and acceptance criteria before acting
-- Work incrementally: plan → execute → verify → summarize
-- Prefer minimal, reversible changes; avoid destructive actions
-- Keep track of actions, commands run, and files touched
-
-## Response Format
-When you need to take action, respond with a JSON block:
-```json
-{
-  "thought": "Your reasoning about what to do next",
-  "action": "action_name",
-  "action_input": { "param": "value" }
-}
-```
-
-Available actions:
-- read_file: {"path": "file/path", "start_line": 1, "end_line": 50}
-- write_file: {"path": "file/path", "content": "file content"}
-- create_file: {"path": "file/path", "content": "file content"}
-- list_directory: {"path": "."}
-- search_files: {"pattern": "**/*.py", "path": "."}
-- grep_search: {"pattern": "regex", "path": ".", "file_pattern": "*.py"}
-- run_command: {"command": "pytest tests/", "timeout": 60}
-- detect_environment: {}
-- git_status: {}
-- plan: {"steps": ["step 1", "step 2", ...]}
-- complete: {"summary": "What was accomplished", "next_steps": ["Optional next steps"]}
-
-When you have finished the task or have a final answer, use the "complete" action.
-
-## Guidelines
-- Read files before modifying them to understand context
-- Run tests after making changes to verify correctness
-- If a command fails, analyze the error and propose a fix
-- Keep changes focused and minimal
-- Ask clarifying questions if requirements are unclear
-"""
-
-
-class AgentMode(str, Enum):
-    """Agent operating mode."""
-    COPILOT = "copilot"
-    GITHUB_MODELS = "github-models"
-
-
-@dataclass
-class AgentConfig:
-    """Configuration for the agent."""
-    mode: AgentMode = AgentMode.COPILOT
-    model: str = "gpt-4o-mini"
-    workdir: str = field(default_factory=lambda: str(Path.cwd()))
-    system_prompt: Optional[str] = None
-    copilot_host: str = "127.0.0.1"
-    copilot_port: int = 19823
-    max_iterations: int = 20
-    auto_confirm: bool = False  # Auto-confirm destructive actions
-    verbose: bool = False
-    log_dir: Optional[str] = None  # Directory for log files
-    log_to_file: bool = True  # Enable file logging
-    log_to_console: bool = False  # Enable console logging (separate from rich output)
-    
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "AgentConfig":
-        mode = data.get("mode", "copilot")
-        if isinstance(mode, str):
-            mode = AgentMode(mode)
-        return cls(
-            mode=mode,
-            model=data.get("model", "gpt-4o-mini"),
-            workdir=data.get("workdir", str(Path.cwd())),
-            system_prompt=data.get("system_prompt"),
-            copilot_host=data.get("copilot_host", "127.0.0.1"),
-            copilot_port=data.get("copilot_port", 19823),
-            max_iterations=data.get("max_iterations", 20),
-            auto_confirm=data.get("auto_confirm", False),
-            verbose=data.get("verbose", False),
-            log_dir=data.get("log_dir"),
-            log_to_file=data.get("log_to_file", True),
-            log_to_console=data.get("log_to_console", False),
-        )
-
-
-@dataclass
-class AgentResponse:
-    """Response from agent execution."""
-    thought: Optional[str] = None
-    action: Optional[str] = None
-    action_input: Optional[Dict[str, Any]] = None
-    action_result: Optional[str] = None
-    is_complete: bool = False
-    summary: Optional[str] = None
-    error: Optional[str] = None
-    raw_response: Optional[str] = None
+from .config import AgentConfig, AgentMode, AgentResponse
+from .prompt import DEVELOPER_AGENT_SYSTEM_PROMPT
 
 
 class Agent:
     """
     Autonomous developer agent using ReAct pattern.
-    
+
     The agent:
     1. Receives a task/goal
     2. Reasons about what to do (Thought)
@@ -132,11 +26,11 @@ class Agent:
     4. Observes the result (Observe)
     5. Repeats until task is complete
     """
-    
+
     def __init__(self, config: Optional[AgentConfig] = None):
         """
         Initialize the agent.
-        
+
         Args:
             config: Agent configuration
         """
@@ -150,7 +44,7 @@ class Agent:
         self.tools = ToolRegistry(workdir=self.config.workdir)
         self._client: Optional[CopilotBridgeClient] = None
         self._callbacks: Dict[str, Callable] = {}
-        
+
         # Initialize logger
         self.logger = AgentLogger(
             log_dir=self.config.log_dir,
@@ -158,7 +52,7 @@ class Agent:
             log_to_console=self.config.log_to_console,
             console_level=LogLevel.DEBUG if self.config.verbose else LogLevel.INFO,
         )
-    
+
     @property
     def client(self) -> CopilotBridgeClient:
         """Get or create LLM client."""
@@ -176,23 +70,23 @@ class Agent:
                     model=self.config.model,
                 )
         return self._client
-    
+
     def on(self, event: str, callback: Callable):
         """Register event callback."""
         self._callbacks[event] = callback
-    
+
     def _emit(self, event: str, data: Any = None):
         """Emit event to callbacks."""
         if event in self._callbacks:
             self._callbacks[event](data)
-    
+
     def check_connection(self) -> bool:
         """Check if LLM backend is available."""
         try:
             return self.client.is_available()
-        except:
+        except Exception:
             return False
-    
+
     def get_available_models(self) -> List[str]:
         """Get available models from the backend."""
         try:
@@ -200,50 +94,53 @@ class Agent:
             return [m.family for m in models]
         except CopilotBridgeError:
             return []
-    
+
     def set_mode(self, mode: str):
         """Set operating mode."""
         self.config.mode = AgentMode(mode)
         self.session.mode = mode
         self._client = None  # Reset client
-    
+
     def set_model(self, model: str):
         """Set model to use."""
         self.config.model = model
         self.session.model = model
         if self._client:
             self._client.model = model
-    
+
     def set_workdir(self, path: str):
         """Set working directory."""
         self.config.workdir = str(Path(path).resolve())
         self.session.workdir = self.config.workdir
         self.tools.set_workdir(self.config.workdir)
-    
+
     def set_system_prompt(self, prompt: str):
         """Set system prompt."""
         self.config.system_prompt = prompt
         self.session.system_prompt = prompt
-    
+
     def chat(self, user_input: str) -> str:
         """
         Send a message and get a response (simple chat mode).
-        
+
         Args:
             user_input: User message
-            
+
         Returns:
             Assistant response
         """
         self.session.add_message("user", user_input)
-        
+
         messages = [
-            ChatMessage(role="system", content=self.session.system_prompt or DEVELOPER_AGENT_SYSTEM_PROMPT),
+            ChatMessage(
+                role="system",
+                content=self.session.system_prompt or DEVELOPER_AGENT_SYSTEM_PROMPT,
+            ),
         ]
-        
+
         for msg in self.session.messages:
             messages.append(ChatMessage(role=msg.role, content=msg.content))
-        
+
         try:
             response = self.client.chat(messages, model=self.config.model)
             self.session.add_message("assistant", response.content)
@@ -251,46 +148,49 @@ class Agent:
         except CopilotBridgeError as e:
             error_msg = f"Error: {e}"
             return error_msg
-    
+
     def run_task(self, task: str, max_iterations: Optional[int] = None) -> AgentResponse:
         """
         Run an autonomous task using the ReAct loop.
-        
+
         Args:
             task: Task description
             max_iterations: Maximum iterations (overrides config)
-            
+
         Returns:
             Final AgentResponse
         """
         max_iter = max_iterations or self.config.max_iterations
         self.session.set_goal(task)
-        
+
         # Start logging the interaction
         self.logger.start_interaction(self.session.id, task)
-        
+
         # Initial prompt with task
-        self.session.add_message("user", f"Task: {task}\n\nPlease analyze this task and create a plan, then execute it step by step.")
-        
+        self.session.add_message(
+            "user",
+            f"Task: {task}\n\nPlease analyze this task and create a plan, then execute it step by step.",
+        )
+
         self._emit("task_start", {"task": task})
-        
+
         try:
             for iteration in range(max_iter):
                 self._emit("iteration_start", {"iteration": iteration + 1})
-                
+
                 # Get LLM response
                 response = self._get_llm_response()
-                
+
                 if response.error:
                     self._emit("error", {"error": response.error})
                     self.logger.end_interaction(status="failed", error=response.error)
                     return response
-                
+
                 self._emit("thought", {"thought": response.thought})
-                
+
                 # Log iteration
                 observation = None
-                
+
                 # Check if complete
                 if response.is_complete:
                     self._emit("task_complete", {"summary": response.summary})
@@ -304,16 +204,16 @@ class Agent:
                     )
                     self.logger.end_interaction(status="completed", result=response.summary)
                     return response
-                
+
                 # Execute action
                 if response.action:
                     action_start = time.time()
                     result = self._execute_action(response.action, response.action_input or {})
                     action_duration = (time.time() - action_start) * 1000
-                    
+
                     response.action_result = result.output if result.success else f"Error: {result.error}"
                     observation = response.action_result
-                    
+
                     # Log tool call
                     self.logger.log_tool_call(
                         tool=response.action,
@@ -323,17 +223,20 @@ class Agent:
                         duration_ms=action_duration,
                         error=result.error if not result.success else None,
                     )
-                    
-                    self._emit("action_result", {
-                        "action": response.action,
-                        "success": result.success,
-                        "output": response.action_result,
-                    })
-                    
+
+                    self._emit(
+                        "action_result",
+                        {
+                            "action": response.action,
+                            "success": result.success,
+                            "output": response.action_result,
+                        },
+                    )
+
                     # Add observation to conversation
                     obs_message = f"Observation from {response.action}:\n{response.action_result}"
                     self.session.add_message("user", obs_message)
-                    
+
                     # Log action to session
                     self.session.add_action(
                         action_type=self._action_to_type(response.action),
@@ -342,7 +245,7 @@ class Agent:
                         result=response.action_result[:500],
                         success=result.success,
                     )
-                
+
                 # Log iteration
                 self.logger.log_iteration(
                     iteration=iteration + 1,
@@ -352,37 +255,40 @@ class Agent:
                     observation=observation,
                     is_complete=False,
                 )
-            
+
             # Max iterations reached
             self.logger.end_interaction(status="incomplete", error="max_iterations_exceeded")
             return AgentResponse(
                 is_complete=True,
                 summary="Maximum iterations reached. Task may be incomplete.",
-                error="max_iterations_exceeded"
+                error="max_iterations_exceeded",
             )
         except Exception as e:
             self.logger.end_interaction(status="failed", error=str(e))
             raise
-    
+
     def _get_llm_response(self) -> AgentResponse:
         """Get and parse LLM response."""
         messages = [
-            ChatMessage(role="system", content=self.session.system_prompt or DEVELOPER_AGENT_SYSTEM_PROMPT),
+            ChatMessage(
+                role="system",
+                content=self.session.system_prompt or DEVELOPER_AGENT_SYSTEM_PROMPT,
+            ),
         ]
-        
+
         for msg in self.session.messages:
             messages.append(ChatMessage(role=msg.role, content=msg.content))
-        
+
         # Log the request
         msg_dicts = [{"role": m.role, "content": m.content} for m in messages]
         self.logger.log_llm_request(self.config.model, msg_dicts)
-        
+
         start_time = time.time()
         try:
             response = self.client.chat(messages, model=self.config.model)
             content = response.content
             duration_ms = (time.time() - start_time) * 1000
-            
+
             # Log the response
             self.logger.log_llm_response(
                 model=self.config.model,
@@ -390,11 +296,11 @@ class Agent:
                 response=content,
                 duration_ms=duration_ms,
             )
-            
+
             self.session.add_message("assistant", content)
-            
+
             return self._parse_response(content)
-            
+
         except CopilotBridgeError as e:
             duration_ms = (time.time() - start_time) * 1000
             self.logger.log_llm_response(
@@ -405,25 +311,25 @@ class Agent:
                 error=str(e),
             )
             return AgentResponse(error=str(e))
-    
+
     def _parse_response(self, content: str) -> AgentResponse:
         """Parse LLM response to extract thought/action."""
         response = AgentResponse(raw_response=content)
-        
+
         # Try to extract JSON block
-        json_match = re.search(r'```json\s*(\{.*?\})\s*```', content, re.DOTALL)
-        
+        json_match = re.search(r"```json\s*(\{.*?\})\s*```", content, re.DOTALL)
+
         if json_match:
             try:
                 data = json.loads(json_match.group(1))
                 response.thought = data.get("thought")
                 response.action = data.get("action")
                 response.action_input = data.get("action_input", {})
-                
+
                 if response.action == "complete":
                     response.is_complete = True
                     response.summary = response.action_input.get("summary", content)
-                    
+
             except json.JSONDecodeError:
                 # Fallback: treat as conversational response
                 response.is_complete = True
@@ -432,9 +338,9 @@ class Agent:
             # No JSON found, treat as conversational
             response.is_complete = True
             response.summary = content
-        
+
         return response
-    
+
     def _execute_action(self, action: str, params: Dict[str, Any]) -> ToolResult:
         """Execute an action using the tool registry."""
         action_map = {
@@ -473,7 +379,7 @@ class Agent:
             "plan": lambda p: self._handle_plan(p.get("steps", [])),
             "complete": lambda p: ToolResult(True, p.get("summary", "Task completed")),
         }
-        
+
         handler = action_map.get(action)
         if handler:
             try:
@@ -482,18 +388,18 @@ class Agent:
                 return ToolResult(False, "", str(e))
         else:
             return ToolResult(False, "", f"Unknown action: {action}")
-    
+
     def _handle_plan(self, steps: List[str]) -> ToolResult:
         """Handle plan action - store plan in session state."""
         self.session.state.plan = steps
         self.session.state.plan_step = 0
-        
+
         plan_text = "Plan created:\n"
         for i, step in enumerate(steps, 1):
             plan_text += f"  {i}. {step}\n"
-        
+
         return ToolResult(True, plan_text, data={"steps": steps})
-    
+
     def _action_to_type(self, action: str) -> ActionType:
         """Map action name to ActionType."""
         mapping = {
@@ -510,7 +416,7 @@ class Agent:
             "complete": ActionType.VERIFY,
         }
         return mapping.get(action, ActionType.LLM_CALL)
-    
+
     def status(self) -> Dict[str, Any]:
         """Get current agent status."""
         return {
@@ -523,11 +429,11 @@ class Agent:
             "actions": len(self.session.actions),
             "state": self.session.state.summary(),
         }
-    
+
     def save_session(self, path: str):
         """Save current session to file."""
         self.session.save(path)
-    
+
     def load_session(self, path: str):
         """Load session from file."""
         self.session = Session.load(path)
