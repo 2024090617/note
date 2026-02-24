@@ -10,6 +10,7 @@ from ..copilot_client import CopilotBridgeClient, ChatMessage, CopilotBridgeErro
 from ..session import Session, SessionState, Action, ActionType
 from ..tools import ToolRegistry, ToolResult
 from ..logger import AgentLogger, LogLevel
+from ..skills import create_skill_manager
 
 from .config import AgentConfig, AgentMode, AgentResponse
 from .prompt import DEVELOPER_AGENT_SYSTEM_PROMPT
@@ -51,6 +52,11 @@ class Agent:
             log_to_file=self.config.log_to_file,
             log_to_console=self.config.log_to_console,
             console_level=LogLevel.DEBUG if self.config.verbose else LogLevel.INFO,
+        )
+
+        # Initialize skill manager (multi-location discovery)
+        self.skill_manager = create_skill_manager(
+            project_root=Path(self.config.workdir) if self.config.workdir else None
         )
 
     @property
@@ -267,12 +273,34 @@ class Agent:
             self.logger.end_interaction(status="failed", error=str(e))
             raise
 
+    def _build_system_prompt(self) -> str:
+        """Build system prompt with available skills injected."""
+        base_prompt = self.session.system_prompt or DEVELOPER_AGENT_SYSTEM_PROMPT
+
+        if not self.skill_manager:
+            return base_prompt
+
+        skills = self.skill_manager.list_skills()
+        if not skills:
+            return base_prompt
+
+        # Build <available_skills> XML block (agentskills.io format)
+        lines = ["<available_skills>"]
+        for skill in skills:
+            lines.append(f"  <skill>")
+            lines.append(f"    <name>{skill.name}</name>")
+            lines.append(f"    <description>{skill.description}</description>")
+            lines.append(f"  </skill>")
+        lines.append("</available_skills>\n")
+
+        return "\n".join(lines) + "\n" + base_prompt
+
     def _get_llm_response(self) -> AgentResponse:
         """Get and parse LLM response."""
         messages = [
             ChatMessage(
                 role="system",
-                content=self.session.system_prompt or DEVELOPER_AGENT_SYSTEM_PROMPT,
+                content=self._build_system_prompt(),
             ),
         ]
 
@@ -376,6 +404,11 @@ class Agent:
             ),
             "detect_environment": lambda p: self.tools.detect_environment(),
             "git_status": lambda p: self.tools.get_git_status(),
+            "use_skill": lambda p: self._handle_use_skill(p.get("skill_name", "")),
+            "list_skills": lambda p: self._handle_list_skills(),
+            "create_thesis_template": lambda p: self.tools.create_thesis_template(
+                p.get("output_path", "thesis_template.docx"),
+            ),
             "plan": lambda p: self._handle_plan(p.get("steps", [])),
             "complete": lambda p: ToolResult(True, p.get("summary", "Task completed")),
         }
@@ -388,6 +421,32 @@ class Agent:
                 return ToolResult(False, "", str(e))
         else:
             return ToolResult(False, "", f"Unknown action: {action}")
+
+    def _handle_use_skill(self, skill_name: str) -> ToolResult:
+        """Activate a skill and return its full instructions."""
+        if not self.skill_manager:
+            return ToolResult(False, "", "Skill manager not available")
+        if not skill_name:
+            return ToolResult(False, "", "skill_name is required")
+
+        content = self.skill_manager.invoke_skill(skill_name)
+        if content:
+            return ToolResult(True, content)
+        return ToolResult(False, "", f"Skill '{skill_name}' not found")
+
+    def _handle_list_skills(self) -> ToolResult:
+        """List all available skills."""
+        if not self.skill_manager:
+            return ToolResult(True, "No skills available (skillkit not installed)")
+
+        skills = self.skill_manager.list_skills()
+        if not skills:
+            return ToolResult(True, "No skills found in any location")
+
+        lines = [f"Available skills ({len(skills)}):"]
+        for s in skills:
+            lines.append(f"  - {s.name}: {s.description}")
+        return ToolResult(True, "\n".join(lines))
 
     def _handle_plan(self, steps: List[str]) -> ToolResult:
         """Handle plan action - store plan in session state."""
@@ -412,6 +471,9 @@ class Agent:
             "run_command": ActionType.COMMAND_RUN,
             "detect_environment": ActionType.COMMAND_RUN,
             "git_status": ActionType.COMMAND_RUN,
+            "use_skill": ActionType.LLM_CALL,
+            "list_skills": ActionType.LLM_CALL,
+            "create_thesis_template": ActionType.FILE_CREATE,
             "plan": ActionType.PLAN,
             "complete": ActionType.VERIFY,
         }
@@ -419,6 +481,10 @@ class Agent:
 
     def status(self) -> Dict[str, Any]:
         """Get current agent status."""
+        skill_info = None
+        if self.skill_manager:
+            skill_info = self.skill_manager.get_skill_locations()
+
         return {
             "mode": self.config.mode.value,
             "model": self.config.model,
@@ -428,6 +494,7 @@ class Agent:
             "messages": len(self.session.messages),
             "actions": len(self.session.actions),
             "state": self.session.state.summary(),
+            "skills": skill_info,
         }
 
     def save_session(self, path: str):

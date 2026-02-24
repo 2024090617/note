@@ -32,10 +32,18 @@ Available actions:
 - run_command: {"command": "pytest tests/", "timeout": 60}
 - detect_environment: {}
 - git_status: {}
+- use_skill: {"skill_name": "skill-name"} — Load a skill's full instructions for the current task
+- list_skills: {} — List all available skills
+- create_thesis_template: {"output_path": "thesis_template.docx"} — Generate a Chinese master's thesis DOCX template
 - plan: {"steps": ["step 1", "step 2", ...]}
 - complete: {"summary": "What was accomplished", "next_steps": ["Optional next steps"]}
 
 When you have finished the task or have a final answer, use the "complete" action.
+
+## Skills
+Skills are reusable instruction packages (agentskills.io standard) that enhance your capabilities.
+When available skills are listed in <available_skills>, activate one with use_skill if its
+description matches the current task. Only load a skill when you actually need its instructions.
 
 ## Guidelines
 - Read files before modifying them to understand context

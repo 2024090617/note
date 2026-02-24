@@ -5,6 +5,7 @@ from .file_ops import FileOpsMixin
 from .search_ops import SearchOpsMixin
 from .command_ops import CommandOpsMixin
 from .environment_ops import EnvironmentOpsMixin
+from .document_ops import DocumentOpsMixin
 
 
 class ToolRegistry(
@@ -13,6 +14,7 @@ class ToolRegistry(
     SearchOpsMixin,
     CommandOpsMixin,
     EnvironmentOpsMixin,
+    # DocumentOpsMixin,
 ):
     """
     Registry of tools available to the agent.
