@@ -406,9 +406,22 @@ class Agent:
             "git_status": lambda p: self.tools.get_git_status(),
             "use_skill": lambda p: self._handle_use_skill(p.get("skill_name", "")),
             "list_skills": lambda p: self._handle_list_skills(),
-            "create_thesis_template": lambda p: self.tools.create_thesis_template(
-                p.get("output_path", "thesis_template.docx"),
+            "run_in_docker": lambda p: self.tools.run_in_docker(
+                p.get("script", ""),
+                p.get("language", "python"),
+                p.get("image", ""),
+                p.get("timeout", 120),
+                p.get("pip_packages"),
+                p.get("network", False),
             ),
+            "docker_search": lambda p: self.tools.docker_search(
+                p.get("query", ""),
+                p.get("limit", 5),
+            ),
+            "docker_pull": lambda p: self.tools.docker_pull(
+                p.get("image", ""),
+            ),
+            "docker_available": lambda p: self.tools.docker_available(),
             "plan": lambda p: self._handle_plan(p.get("steps", [])),
             "complete": lambda p: ToolResult(True, p.get("summary", "Task completed")),
         }
@@ -473,7 +486,10 @@ class Agent:
             "git_status": ActionType.COMMAND_RUN,
             "use_skill": ActionType.LLM_CALL,
             "list_skills": ActionType.LLM_CALL,
-            "create_thesis_template": ActionType.FILE_CREATE,
+            "run_in_docker": ActionType.COMMAND_RUN,
+            "docker_search": ActionType.SEARCH,
+            "docker_pull": ActionType.COMMAND_RUN,
+            "docker_available": ActionType.COMMAND_RUN,
             "plan": ActionType.PLAN,
             "complete": ActionType.VERIFY,
         }

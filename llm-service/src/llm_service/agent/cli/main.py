@@ -30,6 +30,8 @@ def main():
         log_to_file=not args.no_log_file,
         log_to_console=args.verbose,
         verbose=args.verbose,
+        sandbox_enabled=args.sandbox,
+        sandbox_default_image=args.sandbox_image,
     )
 
     # Create agent

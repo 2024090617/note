@@ -70,6 +70,18 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "--sandbox",
+        action="store_true",
+        help="Enable Docker sandbox for script execution",
+    )
+
+    parser.add_argument(
+        "--sandbox-image",
+        default="python:3.12-slim",
+        help="Default Docker image for sandbox (default: python:3.12-slim)",
+    )
+
+    parser.add_argument(
         "task",
         nargs="*",
         help="Task to run (non-interactive mode)",
