@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "monitoring": {
+      "command": "monitoring-mcp",
+      "args": [],
+      "env": {"SPLUNK_URL": "https://..."}
+    }
+  }
+}
