@@ -34,6 +34,9 @@ class AgentConfig:
     sandbox_enabled: bool = False  # Enable Docker sandbox for script execution
     sandbox_default_image: str = "python:3.12-slim"  # Default Docker image
 
+    # MCP settings
+    mcp_config_path: Optional[str] = None  # Path to mcp.json config file
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AgentConfig":
         mode = data.get("mode", "copilot")
@@ -54,6 +57,7 @@ class AgentConfig:
             log_to_console=data.get("log_to_console", False),
             sandbox_enabled=data.get("sandbox_enabled", False),
             sandbox_default_image=data.get("sandbox_default_image", "python:3.12-slim"),
+            mcp_config_path=data.get("mcp_config_path"),
         )
 
 

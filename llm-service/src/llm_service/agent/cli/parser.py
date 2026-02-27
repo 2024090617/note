@@ -82,6 +82,11 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "--mcp-config",
+        help="Path to MCP servers config file (mcp.json)",
+    )
+
+    parser.add_argument(
         "task",
         nargs="*",
         help="Task to run (non-interactive mode)",

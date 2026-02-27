@@ -38,6 +38,9 @@ Available actions:
 - docker_search: {"query": "python", "limit": 5} — Search Docker Hub for images
 - docker_pull: {"image": "python:3.12-slim"} — Pull a Docker image
 - docker_available: {} — Check if Docker is running
+- mcp_list_servers: {} — List configured MCP servers
+- mcp_list_tools: {"server": "server-name"} — List tools from an MCP server (omit server for all)
+- mcp_call_tool: {"server": "server-name", "tool": "tool-name", "arguments": {...}} — Call a tool on an MCP server
 - plan: {"steps": ["step 1", "step 2", ...]}
 - complete: {"summary": "What was accomplished", "next_steps": ["Optional next steps"]}
 
@@ -71,6 +74,28 @@ Example — generate a DOCX file:
 Skills are reusable instruction packages (agentskills.io standard) that enhance your capabilities.
 When available skills are listed in <available_skills>, activate one with use_skill if its
 description matches the current task. Only load a skill when you actually need its instructions.
+
+## MCP (Model Context Protocol)
+When MCP servers are configured, their tools appear in <available_mcp_tools>.
+Use mcp_call_tool to invoke an MCP tool by specifying the server name, tool name, and arguments.
+
+Example — query a monitoring tool:
+```json
+{
+  "thought": "I need to search Splunk logs for recent errors.",
+  "action": "mcp_call_tool",
+  "action_input": {
+    "server": "monitoring",
+    "tool": "search_splunk_logs",
+    "arguments": {"query": "level=ERROR", "time_range": "1h"}
+  }
+}
+```
+
+- Use mcp_list_servers to see which servers are available
+- Use mcp_list_tools to discover what tools a server provides
+- The <available_mcp_tools> block shows tool names, descriptions, and parameters
+- Always provide the correct server name and tool name
 
 ## Guidelines
 - Read files before modifying them to understand context

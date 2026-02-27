@@ -32,6 +32,7 @@ def main():
         verbose=args.verbose,
         sandbox_enabled=args.sandbox,
         sandbox_default_image=args.sandbox_image,
+        mcp_config_path=getattr(args, "mcp_config", None),
     )
 
     # Create agent

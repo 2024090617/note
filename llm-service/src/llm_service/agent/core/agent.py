@@ -11,6 +11,7 @@ from ..session import Session, SessionState, Action, ActionType
 from ..tools import ToolRegistry, ToolResult
 from ..logger import AgentLogger, LogLevel
 from ..skills import create_skill_manager
+from ..mcp import MCPManager
 
 from .config import AgentConfig, AgentMode, AgentResponse
 from .prompt import DEVELOPER_AGENT_SYSTEM_PROMPT
@@ -58,6 +59,15 @@ class Agent:
         self.skill_manager = create_skill_manager(
             project_root=Path(self.config.workdir) if self.config.workdir else None
         )
+
+        # Initialize MCP manager (optional — configured via mcp.json)
+        self.mcp_manager: Optional[MCPManager] = None
+        if self.config.mcp_config_path:
+            try:
+                self.mcp_manager = MCPManager.from_config_file(self.config.mcp_config_path)
+                self.tools.mcp_manager = self.mcp_manager
+            except Exception as e:
+                self.logger.log(LogLevel.WARNING, f"Failed to load MCP config: {e}")
 
     @property
     def client(self) -> CopilotBridgeClient:
@@ -274,26 +284,35 @@ class Agent:
             raise
 
     def _build_system_prompt(self) -> str:
-        """Build system prompt with available skills injected."""
+        """Build system prompt with available skills and MCP tools injected."""
         base_prompt = self.session.system_prompt or DEVELOPER_AGENT_SYSTEM_PROMPT
+        prefix_blocks: List[str] = []
 
-        if not self.skill_manager:
-            return base_prompt
+        # Inject available skills
+        if self.skill_manager:
+            skills = self.skill_manager.list_skills()
+            if skills:
+                lines = ["<available_skills>"]
+                for skill in skills:
+                    lines.append(f"  <skill>")
+                    lines.append(f"    <name>{skill.name}</name>")
+                    lines.append(f"    <description>{skill.description}</description>")
+                    lines.append(f"  </skill>")
+                lines.append("</available_skills>")
+                prefix_blocks.append("\n".join(lines))
 
-        skills = self.skill_manager.list_skills()
-        if not skills:
-            return base_prompt
+        # Inject available MCP tools
+        if self.mcp_manager:
+            try:
+                mcp_summary = self.mcp_manager.get_tools_summary()
+                if mcp_summary:
+                    prefix_blocks.append(mcp_summary)
+            except Exception:
+                pass  # Fail silently — MCP servers may not be reachable yet
 
-        # Build <available_skills> XML block (agentskills.io format)
-        lines = ["<available_skills>"]
-        for skill in skills:
-            lines.append(f"  <skill>")
-            lines.append(f"    <name>{skill.name}</name>")
-            lines.append(f"    <description>{skill.description}</description>")
-            lines.append(f"  </skill>")
-        lines.append("</available_skills>\n")
-
-        return "\n".join(lines) + "\n" + base_prompt
+        if prefix_blocks:
+            return "\n\n".join(prefix_blocks) + "\n\n" + base_prompt
+        return base_prompt
 
     def _get_llm_response(self) -> AgentResponse:
         """Get and parse LLM response."""
@@ -422,6 +441,15 @@ class Agent:
                 p.get("image", ""),
             ),
             "docker_available": lambda p: self.tools.docker_available(),
+            "mcp_list_servers": lambda p: self.tools.mcp_list_servers(),
+            "mcp_list_tools": lambda p: self.tools.mcp_list_tools(
+                p.get("server"),
+            ),
+            "mcp_call_tool": lambda p: self.tools.mcp_call_tool(
+                p.get("server", ""),
+                p.get("tool", ""),
+                p.get("arguments"),
+            ),
             "plan": lambda p: self._handle_plan(p.get("steps", [])),
             "complete": lambda p: ToolResult(True, p.get("summary", "Task completed")),
         }
@@ -490,6 +518,9 @@ class Agent:
             "docker_search": ActionType.SEARCH,
             "docker_pull": ActionType.COMMAND_RUN,
             "docker_available": ActionType.COMMAND_RUN,
+            "mcp_list_servers": ActionType.SEARCH,
+            "mcp_list_tools": ActionType.SEARCH,
+            "mcp_call_tool": ActionType.LLM_CALL,
             "plan": ActionType.PLAN,
             "complete": ActionType.VERIFY,
         }
@@ -501,6 +532,13 @@ class Agent:
         if self.skill_manager:
             skill_info = self.skill_manager.get_skill_locations()
 
+        mcp_info = None
+        if self.mcp_manager:
+            mcp_info = {
+                "servers": self.mcp_manager.list_servers(),
+                "total_tools": len(self.mcp_manager.list_tools()),
+            }
+
         return {
             "mode": self.config.mode.value,
             "model": self.config.model,
@@ -511,6 +549,7 @@ class Agent:
             "actions": len(self.session.actions),
             "state": self.session.state.summary(),
             "skills": skill_info,
+            "mcp": mcp_info,
         }
 
     def save_session(self, path: str):
