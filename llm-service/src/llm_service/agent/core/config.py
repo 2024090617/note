@@ -37,6 +37,10 @@ class AgentConfig:
     # MCP settings
     mcp_config_path: Optional[str] = None  # Path to mcp.json config file
 
+    # Memory settings
+    memory_strategy: str = "claude-code"  # "claude-code" | "openclaw" | "none"
+    memory_dir: Optional[str] = None  # Defaults to <workdir>/.agent/memory
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AgentConfig":
         mode = data.get("mode", "copilot")
@@ -58,6 +62,8 @@ class AgentConfig:
             sandbox_enabled=data.get("sandbox_enabled", False),
             sandbox_default_image=data.get("sandbox_default_image", "python:3.12-slim"),
             mcp_config_path=data.get("mcp_config_path"),
+            memory_strategy=data.get("memory_strategy", "claude-code"),
+            memory_dir=data.get("memory_dir"),
         )
 
 

@@ -87,6 +87,24 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "--memory-strategy",
+        choices=["claude-code", "openclaw", "none"],
+        default="claude-code",
+        help="Memory strategy (default: claude-code)",
+    )
+
+    parser.add_argument(
+        "--memory-dir",
+        help="Directory for memory storage (default: <workdir>/.agent/memory)",
+    )
+
+    parser.add_argument(
+        "--no-memory",
+        action="store_true",
+        help="Disable memory (shorthand for --memory-strategy none)",
+    )
+
+    parser.add_argument(
         "task",
         nargs="*",
         help="Task to run (non-interactive mode)",

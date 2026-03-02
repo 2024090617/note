@@ -12,6 +12,7 @@ from ..tools import ToolRegistry, ToolResult
 from ..logger import AgentLogger, LogLevel
 from ..skills import create_skill_manager
 from ..mcp import MCPManager
+from ..memory import create_memory_manager, MemoryStrategy
 
 from .config import AgentConfig, AgentMode, AgentResponse
 from .prompt import DEVELOPER_AGENT_SYSTEM_PROMPT
@@ -68,6 +69,18 @@ class Agent:
                 self.tools.mcp_manager = self.mcp_manager
             except Exception as e:
                 self.logger.log(LogLevel.WARNING, f"Failed to load MCP config: {e}")
+
+        # Initialize memory manager (configurable strategy)
+        self.memory_manager: Optional[MemoryStrategy] = None
+        if self.config.memory_strategy != "none":
+            try:
+                self.memory_manager = create_memory_manager(
+                    strategy=self.config.memory_strategy,
+                    memory_dir=self.config.memory_dir,
+                    workdir=self.config.workdir,
+                )
+            except Exception as e:
+                self.logger.log(LogLevel.WARNING, f"Failed to init memory: {e}")
 
     @property
     def client(self) -> CopilotBridgeClient:
@@ -310,6 +323,15 @@ class Agent:
             except Exception:
                 pass  # Fail silently — MCP servers may not be reachable yet
 
+        # Inject memory context
+        if self.memory_manager:
+            try:
+                mem_ctx = self.memory_manager.get_prompt_context()
+                if mem_ctx:
+                    prefix_blocks.append(mem_ctx)
+            except Exception:
+                pass  # Fail silently — memory may not be readable
+
         if prefix_blocks:
             return "\n\n".join(prefix_blocks) + "\n\n" + base_prompt
         return base_prompt
@@ -450,6 +472,15 @@ class Agent:
                 p.get("tool", ""),
                 p.get("arguments"),
             ),
+            "memory_store": lambda p: self._handle_memory_store(
+                p.get("content", ""),
+                p.get("topic"),
+            ),
+            "memory_recall": lambda p: self._handle_memory_recall(
+                p.get("query", ""),
+                p.get("limit", 5),
+            ),
+            "memory_list": lambda p: self._handle_memory_list(),
             "plan": lambda p: self._handle_plan(p.get("steps", [])),
             "complete": lambda p: ToolResult(True, p.get("summary", "Task completed")),
         }
@@ -489,6 +520,49 @@ class Agent:
             lines.append(f"  - {s.name}: {s.description}")
         return ToolResult(True, "\n".join(lines))
 
+    def _handle_memory_store(self, content: str, topic: Optional[str] = None) -> ToolResult:
+        """Store a memory entry."""
+        if not self.memory_manager:
+            return ToolResult(False, "", "Memory not configured (use --memory-strategy)")
+        if not content:
+            return ToolResult(False, "", "content is required")
+        try:
+            msg = self.memory_manager.store(content, topic)
+            return ToolResult(True, msg)
+        except Exception as e:
+            return ToolResult(False, "", f"Failed to store memory: {e}")
+
+    def _handle_memory_recall(self, query: str, limit: int = 5) -> ToolResult:
+        """Search stored memories."""
+        if not self.memory_manager:
+            return ToolResult(False, "", "Memory not configured (use --memory-strategy)")
+        if not query:
+            return ToolResult(False, "", "query is required")
+        try:
+            entries = self.memory_manager.recall(query, limit=limit)
+            if not entries:
+                return ToolResult(True, "No matching memories found.")
+            lines = [f"Found {len(entries)} memories:"]
+            for e in entries:
+                src = f" [{e.source}]" if e.source else ""
+                lines.append(f"  - (score: {e.score:.2f}{src}) {e.content}")
+            return ToolResult(True, "\n".join(lines))
+        except Exception as e:
+            return ToolResult(False, "", f"Memory recall failed: {e}")
+
+    def _handle_memory_list(self) -> ToolResult:
+        """List all memory files."""
+        if not self.memory_manager:
+            return ToolResult(False, "", "Memory not configured (use --memory-strategy)")
+        try:
+            items = self.memory_manager.list_memories()
+            if not items:
+                return ToolResult(True, "No memory files found.")
+            header = f"Memory ({self.memory_manager.name} strategy):"
+            return ToolResult(True, header + "\n" + "\n".join(f"  {i}" for i in items))
+        except Exception as e:
+            return ToolResult(False, "", f"Memory list failed: {e}")
+
     def _handle_plan(self, steps: List[str]) -> ToolResult:
         """Handle plan action - store plan in session state."""
         self.session.state.plan = steps
@@ -521,6 +595,9 @@ class Agent:
             "mcp_list_servers": ActionType.SEARCH,
             "mcp_list_tools": ActionType.SEARCH,
             "mcp_call_tool": ActionType.LLM_CALL,
+            "memory_store": ActionType.FILE_WRITE,
+            "memory_recall": ActionType.SEARCH,
+            "memory_list": ActionType.SEARCH,
             "plan": ActionType.PLAN,
             "complete": ActionType.VERIFY,
         }
@@ -539,6 +616,14 @@ class Agent:
                 "total_tools": len(self.mcp_manager.list_tools()),
             }
 
+        memory_info = None
+        if self.memory_manager:
+            memory_info = {
+                "strategy": self.memory_manager.name,
+                "memory_dir": self.memory_manager.memory_dir,
+                "files": len(self.memory_manager.list_memories()),
+            }
+
         return {
             "mode": self.config.mode.value,
             "model": self.config.model,
@@ -550,6 +635,7 @@ class Agent:
             "state": self.session.state.summary(),
             "skills": skill_info,
             "mcp": mcp_info,
+            "memory": memory_info,
         }
 
     def save_session(self, path: str):

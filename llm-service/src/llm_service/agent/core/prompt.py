@@ -41,6 +41,9 @@ Available actions:
 - mcp_list_servers: {} — List configured MCP servers
 - mcp_list_tools: {"server": "server-name"} — List tools from an MCP server (omit server for all)
 - mcp_call_tool: {"server": "server-name", "tool": "tool-name", "arguments": {...}} — Call a tool on an MCP server
+- memory_store: {"content": "important fact or convention", "topic": "optional-topic"} — Save to persistent memory
+- memory_recall: {"query": "search terms", "limit": 5} — Search stored memories
+- memory_list: {} — List all memory files
 - plan: {"steps": ["step 1", "step 2", ...]}
 - complete: {"summary": "What was accomplished", "next_steps": ["Optional next steps"]}
 
@@ -96,6 +99,31 @@ Example — query a monitoring tool:
 - Use mcp_list_tools to discover what tools a server provides
 - The <available_mcp_tools> block shows tool names, descriptions, and parameters
 - Always provide the correct server name and tool name
+
+## Memory
+You have persistent memory that survives across sessions. When the <memory> block
+appears above, it contains previously stored knowledge.
+
+- When you discover important project conventions, useful commands, debugging
+  insights, or user preferences, use memory_store to save them for future sessions.
+- Use memory_recall to search for previously stored context when you need project
+  knowledge or past decisions.
+- For the "claude-code" strategy: provide a topic to organize memories into files
+  (e.g. "conventions", "debugging"), or omit topic to append to the main MEMORY.md.
+- For the "openclaw" strategy: use topic="long-term" for durable facts, or omit
+  topic for daily log entries.
+
+Example — store a convention:
+```json
+{
+  "thought": "This project uses pytest with --tb=short. I should remember this.",
+  "action": "memory_store",
+  "action_input": {
+    "content": "Tests use pytest with --tb=short flag",
+    "topic": "conventions"
+  }
+}
+```
 
 ## Guidelines
 - Read files before modifying them to understand context
