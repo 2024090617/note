@@ -39,6 +39,10 @@ dev = [
     "black>=23.0.0",
     "ruff>=0.1.0",
 ]
+memory = [
+    "sqlite-vec>=0.1.0",
+    "sentence-transformers>=2.2.0",
+]
 
 [project.scripts]
 llm = "llm_service.cli:main"
