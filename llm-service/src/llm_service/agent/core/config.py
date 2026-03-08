@@ -41,6 +41,12 @@ class AgentConfig:
     memory_strategy: str = "claude-code"  # "claude-code" | "openclaw" | "none"
     memory_dir: Optional[str] = None  # Defaults to <workdir>/.agent/memory
 
+    # Delegation settings
+    enable_delegation: bool = False
+    max_specialists: int = 3
+    max_candidate_pages: int = 5
+    max_collab_rounds: int = 1
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AgentConfig":
         mode = data.get("mode", "copilot")
@@ -64,6 +70,10 @@ class AgentConfig:
             mcp_config_path=data.get("mcp_config_path"),
             memory_strategy=data.get("memory_strategy", "claude-code"),
             memory_dir=data.get("memory_dir"),
+            enable_delegation=data.get("enable_delegation", False),
+            max_specialists=data.get("max_specialists", 3),
+            max_candidate_pages=data.get("max_candidate_pages", 5),
+            max_collab_rounds=data.get("max_collab_rounds", 1),
         )
 
 

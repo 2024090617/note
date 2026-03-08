@@ -15,6 +15,7 @@ from ..mcp import MCPManager
 from ..memory import create_memory_manager, MemoryStrategy
 
 from .config import AgentConfig, AgentMode, AgentResponse
+from .delegation import DelegationEngine
 from .prompt import DEVELOPER_AGENT_SYSTEM_PROMPT
 
 
@@ -472,6 +473,11 @@ class Agent:
                 p.get("tool", ""),
                 p.get("arguments"),
             ),
+            "delegate_review": lambda p: self._handle_delegate_review(
+                p.get("task", self.session.goal or ""),
+                p.get("candidates", []),
+                p.get("focus"),
+            ),
             "memory_store": lambda p: self._handle_memory_store(
                 p.get("content", ""),
                 p.get("topic"),
@@ -531,6 +537,58 @@ class Agent:
             return ToolResult(True, msg)
         except Exception as e:
             return ToolResult(False, "", f"Failed to store memory: {e}")
+
+    def _handle_delegate_review(
+        self,
+        task: str,
+        candidates: List[Dict[str, Any]],
+        focus: Optional[List[str]] = None,
+    ) -> ToolResult:
+        """Delegate candidate review to specialist sub-agents."""
+        if not self.config.enable_delegation:
+            return ToolResult(
+                False,
+                "",
+                "Delegation is disabled. Start agent with delegation enabled.",
+            )
+
+        if not task.strip():
+            return ToolResult(False, "", "task is required")
+
+        if not isinstance(candidates, list) or not candidates:
+            return ToolResult(False, "", "candidates must be a non-empty list")
+
+        if isinstance(focus, str):
+            focus = [focus]
+        elif focus is not None and not isinstance(focus, list):
+            focus = None
+
+        max_candidates = max(1, int(self.config.max_candidate_pages))
+        limited_candidates = candidates[:max_candidates]
+        try:
+            engine = DelegationEngine(
+                client=self.client,
+                model=self.config.model,
+                max_specialists=self.config.max_specialists,
+                max_collab_rounds=self.config.max_collab_rounds,
+            )
+            result = engine.review_candidates(task, limited_candidates, focus)
+            if not result.get("success"):
+                return ToolResult(False, "", str(result.get("error", "Delegation failed")))
+
+            lines = ["Delegated specialist review completed.", "", "Synthesis:", result.get("synthesis", "")]
+            specialists = result.get("specialists") or []
+            if specialists:
+                lines.append("")
+                lines.append("Specialist outputs:")
+                for item in specialists:
+                    role = item.get("role", "specialist")
+                    review = str(item.get("review", "")).strip()
+                    lines.append(f"- {role}: {review[:700]}")
+
+            return ToolResult(True, "\n".join(lines), data=result)
+        except Exception as e:
+            return ToolResult(False, "", f"Delegation failed: {e}")
 
     def _handle_memory_recall(self, query: str, limit: int = 5) -> ToolResult:
         """Search stored memories."""
@@ -595,6 +653,7 @@ class Agent:
             "mcp_list_servers": ActionType.SEARCH,
             "mcp_list_tools": ActionType.SEARCH,
             "mcp_call_tool": ActionType.LLM_CALL,
+            "delegate_review": ActionType.LLM_CALL,
             "memory_store": ActionType.FILE_WRITE,
             "memory_recall": ActionType.SEARCH,
             "memory_list": ActionType.SEARCH,

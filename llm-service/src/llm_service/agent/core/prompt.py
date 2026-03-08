@@ -41,6 +41,7 @@ Available actions:
 - mcp_list_servers: {} — List configured MCP servers
 - mcp_list_tools: {"server": "server-name"} — List tools from an MCP server (omit server for all)
 - mcp_call_tool: {"server": "server-name", "tool": "tool-name", "arguments": {...}} — Call a tool on an MCP server
+- delegate_review: {"task": "problem to solve", "candidates": [{"title": "...", "content": "...", "owner": "...", "url": "...", "last_updated": "..."}], "focus": ["relevance", "freshness", "applicability"]} — Ask specialist sub-agents to review candidate pages and return a synthesized recommendation
 - memory_store: {"content": "important fact or convention", "topic": "optional-topic"} — Save to persistent memory
 - memory_recall: {"query": "search terms", "limit": 5} — Search stored memories
 - memory_list: {} — List all memory files

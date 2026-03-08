@@ -33,6 +33,10 @@ def main():
         sandbox_enabled=args.sandbox,
         sandbox_default_image=args.sandbox_image,
         mcp_config_path=getattr(args, "mcp_config", None),
+        enable_delegation=getattr(args, "enable_delegation", False),
+        max_specialists=max(1, int(getattr(args, "max_specialists", 3))),
+        max_candidate_pages=max(1, int(getattr(args, "max_candidate_pages", 5))),
+        max_collab_rounds=max(1, int(getattr(args, "max_collab_rounds", 1))),
         memory_strategy="none" if getattr(args, "no_memory", False) else getattr(args, "memory_strategy", "claude-code"),
         memory_dir=getattr(args, "memory_dir", None),
     )

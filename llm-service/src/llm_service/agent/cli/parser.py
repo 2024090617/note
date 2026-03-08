@@ -87,6 +87,33 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "--enable-delegation",
+        action="store_true",
+        help="Enable specialist delegation for reviewing candidate solutions",
+    )
+
+    parser.add_argument(
+        "--max-specialists",
+        type=int,
+        default=3,
+        help="Maximum number of specialist reviewers (default: 3)",
+    )
+
+    parser.add_argument(
+        "--max-candidate-pages",
+        type=int,
+        default=5,
+        help="Maximum candidate pages sent to delegation review (default: 5)",
+    )
+
+    parser.add_argument(
+        "--max-collab-rounds",
+        type=int,
+        default=1,
+        help="Maximum specialist collaboration rounds (default: 1)",
+    )
+
+    parser.add_argument(
         "--memory-strategy",
         choices=["claude-code", "openclaw", "none"],
         default="claude-code",
