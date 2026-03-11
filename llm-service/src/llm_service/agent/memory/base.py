@@ -105,12 +105,16 @@ class MemoryStrategy(ABC):
         ...
 
     @abstractmethod
-    def get_prompt_context(self) -> str:
+    def get_prompt_context(self, max_tokens: int = 0) -> str:
         """
         Build a text block suitable for injection into the system prompt.
 
         Should return an XML-ish block like <memory>...</memory> that the
         LLM will see at the start of every turn.
+
+        Args:
+            max_tokens: Soft token budget. 0 means unlimited (legacy behaviour).
+                        When > 0, implementations should truncate output to fit.
         """
         ...
 

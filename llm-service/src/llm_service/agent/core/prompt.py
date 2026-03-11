@@ -45,6 +45,10 @@ Available actions:
 - memory_store: {"content": "important fact or convention", "topic": "optional-topic"} — Save to persistent memory
 - memory_recall: {"query": "search terms", "limit": 5} — Search stored memories
 - memory_list: {} — List all memory files
+- wm_note: {"key": "finding-name", "content": "text to remember this turn", "priority": 1} — Add/update a working-memory note (scratch-pad, visible every turn)
+- wm_artifact: {"key": "snippet-name", "data": "structured data…", "label": "short description", "priority": 1} — Store a structured artifact in working memory
+- wm_remove: {"key": "item-key"} — Remove a note or artifact from working memory
+- wm_read: {} — Show the current working memory contents
 - plan: {"steps": ["step 1", "step 2", ...]}
 - complete: {"summary": "What was accomplished", "next_steps": ["Optional next steps"]}
 
@@ -122,6 +126,32 @@ Example — store a convention:
   "action_input": {
     "content": "Tests use pytest with --tb=short flag",
     "topic": "conventions"
+  }
+}
+```
+
+## Working Memory
+You have a bounded scratch-pad (working memory) that is visible every turn in the
+``<working_memory>`` block.  Use it to track intermediate state *during* a task:
+
+- **wm_note**: Store keyed text (facts, sub-goals, intermediate conclusions).
+  Higher priority items survive longer when the buffer is full.
+- **wm_artifact**: Store structured data (code snippets, config blocks, schemas).
+- **wm_remove**: Drop items you no longer need.
+- **wm_read**: Inspect the current working memory.
+
+Working memory is automatically cleared at task boundaries.  It is *not*
+persisted across sessions — use memory_store for durable knowledge.
+
+Example — track a finding:
+```json
+{
+  "thought": "The auth service has a 30s hard-coded timeout. I should keep this fact visible.",
+  "action": "wm_note",
+  "action_input": {
+    "key": "auth-timeout",
+    "content": "AuthService.DEFAULT_TIMEOUT = 30s (hard-coded in auth/config.py:42)",
+    "priority": 2
   }
 }
 ```

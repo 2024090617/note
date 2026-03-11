@@ -1,6 +1,7 @@
 """Session class for conversation history and state."""
 
 import json
+import logging
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -8,6 +9,12 @@ from typing import Dict, Any, List, Optional
 
 from .types import Action, ActionType, Message
 from .state import SessionState
+from .budget import ContextBudgetManager, estimate_tokens
+
+logger = logging.getLogger(__name__)
+
+# When compacting, keep the most recent N message pairs intact
+_COMPACT_KEEP_RECENT = 4
 
 
 @dataclass
@@ -16,6 +23,7 @@ class Session:
     Agent session containing conversation history, state, and action log.
 
     Supports save/load for persistence.
+    Now includes context-budget awareness and automatic compaction.
     """
 
     id: str = field(default_factory=lambda: datetime.now().strftime("%Y%m%d_%H%M%S"))
@@ -28,6 +36,9 @@ class Session:
     state: SessionState = field(default_factory=SessionState)
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
+
+    # Compaction tracking
+    _compaction_count: int = field(default=0, init=False, repr=False)
 
     def add_message(self, role: str, content: str) -> Message:
         """Add a message to the conversation."""
@@ -66,6 +77,63 @@ class Session:
             result.append({"role": msg.role, "content": msg.content})
 
         return result
+
+    # ------------------------------------------------------------------
+    # Token estimation
+    # ------------------------------------------------------------------
+
+    def estimate_history_tokens(self) -> int:
+        """Estimate total tokens in conversation messages."""
+        return sum(estimate_tokens(m.content) for m in self.messages)
+
+    # ------------------------------------------------------------------
+    # Compaction
+    # ------------------------------------------------------------------
+
+    def compact(self, keep_recent: int = _COMPACT_KEEP_RECENT) -> str:
+        """Summarise old messages into a single recap, keeping recent ones.
+
+        Returns the summary text that replaced the old messages, or empty
+        string if compaction was not needed (too few messages).
+        """
+        # Need at least keep_recent + 2 messages to be worth compacting
+        if len(self.messages) <= keep_recent + 2:
+            return ""
+
+        old_messages = self.messages[: -keep_recent] if keep_recent > 0 else self.messages[:]
+        recent_messages = self.messages[-keep_recent:] if keep_recent > 0 else []
+
+        # Build a compact summary of old messages
+        summary_lines: List[str] = [
+            "[Conversation summary — older turns compacted to save context]",
+        ]
+
+        # Group into turns and create condensed recap
+        for msg in old_messages:
+            role_tag = msg.role.upper()
+            # Truncate long content to first 150 chars
+            short = msg.content[:150].replace("\n", " ")
+            if len(msg.content) > 150:
+                short += "..."
+            summary_lines.append(f"  {role_tag}: {short}")
+
+        summary_text = "\n".join(summary_lines)
+
+        # Replace old messages with one summary message
+        summary_msg = Message(role="user", content=summary_text)
+        self.messages = [summary_msg] + recent_messages
+        self._compaction_count += 1
+        self.updated_at = datetime.now().isoformat()
+
+        logger.info(
+            "Session compacted: %d old messages → summary (%d tokens), "
+            "kept %d recent. Total compactions: %d",
+            len(old_messages),
+            estimate_tokens(summary_text),
+            len(recent_messages),
+            self._compaction_count,
+        )
+        return summary_text
 
     def clear_conversation(self):
         """Clear conversation history but keep state."""

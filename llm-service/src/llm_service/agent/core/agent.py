@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, Callable
 
 from ..copilot_client import CopilotBridgeClient, ChatMessage, CopilotBridgeError
-from ..session import Session, SessionState, Action, ActionType
+from ..session import Session, SessionState, Action, ActionType, ContextBudgetManager, WorkingMemory
 from ..tools import ToolRegistry, ToolResult
 from ..logger import AgentLogger, LogLevel
 from ..skills import create_skill_manager
@@ -16,6 +16,7 @@ from ..memory import create_memory_manager, MemoryStrategy
 
 from .config import AgentConfig, AgentMode, AgentResponse
 from .delegation import DelegationEngine
+from .roles import RoleRegistry
 from .prompt import DEVELOPER_AGENT_SYSTEM_PROMPT
 
 
@@ -82,6 +83,21 @@ class Agent:
                 )
             except Exception as e:
                 self.logger.log(LogLevel.WARNING, f"Failed to init memory: {e}")
+
+        # Initialize context budget manager
+        self.budget = ContextBudgetManager(
+            context_window=self.config.context_window,
+            response_reserve=self.config.response_reserve,
+        )
+
+        # Initialize shared role registry (delegation engine draws from this)
+        self.role_registry = RoleRegistry()
+
+        # Initialize working memory (task-scoped scratch-pad)
+        self.working_memory = WorkingMemory(
+            max_items=30,
+            max_tokens=self.budget.limit("working_memory"),
+        )
 
     @property
     def client(self) -> CopilotBridgeClient:
@@ -193,6 +209,10 @@ class Agent:
         max_iter = max_iterations or self.config.max_iterations
         self.session.set_goal(task)
 
+        # Sync goal into working memory (clears previous task's scratch-pad)
+        self.working_memory.clear()
+        self.working_memory.set_goal(task)
+
         # Start logging the interaction
         self.logger.start_interaction(self.session.id, task)
 
@@ -298,11 +318,21 @@ class Agent:
             raise
 
     def _build_system_prompt(self) -> str:
-        """Build system prompt with available skills and MCP tools injected."""
+        """Build system prompt with available skills and MCP tools injected.
+
+        Uses the context budget manager to track token usage per component
+        so the caller can decide whether compaction is needed.
+        """
         base_prompt = self.session.system_prompt or DEVELOPER_AGENT_SYSTEM_PROMPT
         prefix_blocks: List[str] = []
 
-        # Inject available skills
+        # Reset budget counters for this turn
+        self.budget.reset()
+
+        # Record base prompt cost first
+        self.budget.record("system_prompt", base_prompt)
+
+        # Inject available skills (honour budget)
         if self.skill_manager:
             skills = self.skill_manager.list_skills()
             if skills:
@@ -313,37 +343,75 @@ class Agent:
                     lines.append(f"    <description>{skill.description}</description>")
                     lines.append(f"  </skill>")
                 lines.append("</available_skills>")
-                prefix_blocks.append("\n".join(lines))
+                skills_text = "\n".join(lines)
+                self.budget.record("skills", skills_text)
+                prefix_blocks.append(skills_text)
 
         # Inject available MCP tools
         if self.mcp_manager:
             try:
                 mcp_summary = self.mcp_manager.get_tools_summary()
                 if mcp_summary:
+                    self.budget.record("mcp_tools", mcp_summary)
                     prefix_blocks.append(mcp_summary)
             except Exception:
                 pass  # Fail silently — MCP servers may not be reachable yet
 
-        # Inject memory context
+        # Inject memory context (token-aware)
         if self.memory_manager:
             try:
-                mem_ctx = self.memory_manager.get_prompt_context()
+                mem_budget = self.budget.remaining("memory")
+                mem_ctx = self.memory_manager.get_prompt_context(max_tokens=mem_budget)
                 if mem_ctx:
+                    self.budget.record("memory", mem_ctx)
                     prefix_blocks.append(mem_ctx)
             except Exception:
                 pass  # Fail silently — memory may not be readable
+
+        # Inject working memory (task-scoped scratch-pad)
+        wm_budget = self.budget.remaining("working_memory")
+        wm_block = self.working_memory.render(max_tokens=wm_budget)
+        if wm_block:
+            self.budget.record("working_memory", wm_block)
+            prefix_blocks.append(wm_block)
 
         if prefix_blocks:
             return "\n\n".join(prefix_blocks) + "\n\n" + base_prompt
         return base_prompt
 
     def _get_llm_response(self) -> AgentResponse:
-        """Get and parse LLM response."""
+        """Get and parse LLM response.
+
+        Builds the system prompt (which records budget for system/skills/mcp/memory),
+        then records history tokens.  If the total exceeds the context window and
+        auto_compact is enabled, the session is compacted before sending.
+        """
+        system_prompt = self._build_system_prompt()
+
+        # Record history token usage *before* deciding to compact
+        history_text = "\n".join(m.content for m in self.session.messages)
+        self.budget.record("history", history_text)
+
+        # Auto-compact if over budget
+        if self.config.auto_compact and self.budget.is_over_budget():
+            self.logger.log(
+                LogLevel.INFO,
+                f"Context budget exceeded ({self.budget.total_used}/{self.budget.available} tokens). "
+                "Compacting session...",
+            )
+            # Flush memory state before compaction
+            if self.memory_manager:
+                try:
+                    self.memory_manager.flush()
+                except Exception:
+                    pass
+            self.session.compact()
+            # Re-record history after compaction
+            history_text = "\n".join(m.content for m in self.session.messages)
+            self.budget.record("history", history_text)
+
         messages = [
-            ChatMessage(
-                role="system",
-                content=self._build_system_prompt(),
-            ),
+            ChatMessage(role="system", content=system_prompt),
         ]
 
         for msg in self.session.messages:
@@ -487,6 +555,21 @@ class Agent:
                 p.get("limit", 5),
             ),
             "memory_list": lambda p: self._handle_memory_list(),
+            "wm_note": lambda p: self._handle_wm_note(
+                p.get("key", ""),
+                p.get("content", ""),
+                p.get("priority", 1),
+            ),
+            "wm_artifact": lambda p: self._handle_wm_artifact(
+                p.get("key", ""),
+                p.get("data", ""),
+                p.get("label", ""),
+                p.get("priority", 1),
+            ),
+            "wm_remove": lambda p: self._handle_wm_remove(
+                p.get("key", ""),
+            ),
+            "wm_read": lambda p: self._handle_wm_read(),
             "plan": lambda p: self._handle_plan(p.get("steps", [])),
             "complete": lambda p: ToolResult(True, p.get("summary", "Task completed")),
         }
@@ -571,6 +654,7 @@ class Agent:
                 model=self.config.model,
                 max_specialists=self.config.max_specialists,
                 max_collab_rounds=self.config.max_collab_rounds,
+                registry=self.role_registry,
             )
             result = engine.review_candidates(task, limited_candidates, focus)
             if not result.get("success"):
@@ -626,11 +710,62 @@ class Agent:
         self.session.state.plan = steps
         self.session.state.plan_step = 0
 
+        # Also sync to working memory
+        self.working_memory.set_goal(self.session.state.goal or "")
+        for i, step in enumerate(steps, 1):
+            self.working_memory.add_note(
+                f"plan-step-{i}", step, priority=2,
+            )
+
         plan_text = "Plan created:\n"
         for i, step in enumerate(steps, 1):
             plan_text += f"  {i}. {step}\n"
 
         return ToolResult(True, plan_text, data={"steps": steps})
+
+    # ------------------------------------------------------------------
+    # Working memory handlers
+    # ------------------------------------------------------------------
+
+    def _handle_wm_note(self, key: str, content: str, priority: int = 1) -> ToolResult:
+        """Add/update a working memory note."""
+        if not key.strip():
+            return ToolResult(False, "", "key is required")
+        if not content.strip():
+            return ToolResult(False, "", "content is required")
+        try:
+            self.working_memory.add_note(key, content, priority=priority)
+            return ToolResult(True, f"Working memory note '{key}' updated ({self.working_memory.summary()})")
+        except Exception as e:
+            return ToolResult(False, "", f"wm_note failed: {e}")
+
+    def _handle_wm_artifact(self, key: str, data: str, label: str = "", priority: int = 1) -> ToolResult:
+        """Add/update a working memory artifact."""
+        if not key.strip():
+            return ToolResult(False, "", "key is required")
+        if not data.strip():
+            return ToolResult(False, "", "data is required")
+        try:
+            self.working_memory.add_artifact(key, data, label=label, priority=priority)
+            return ToolResult(True, f"Working memory artifact '{key}' stored ({self.working_memory.summary()})")
+        except Exception as e:
+            return ToolResult(False, "", f"wm_artifact failed: {e}")
+
+    def _handle_wm_remove(self, key: str) -> ToolResult:
+        """Remove an item from working memory."""
+        if not key.strip():
+            return ToolResult(False, "", "key is required")
+        removed = self.working_memory.remove_note(key) or self.working_memory.remove_artifact(key)
+        if removed:
+            return ToolResult(True, f"Removed '{key}' from working memory")
+        return ToolResult(False, "", f"Key '{key}' not found in working memory")
+
+    def _handle_wm_read(self) -> ToolResult:
+        """Read the current working memory state."""
+        rendered = self.working_memory.render()
+        if not rendered:
+            return ToolResult(True, "Working memory is empty.")
+        return ToolResult(True, rendered)
 
     def _action_to_type(self, action: str) -> ActionType:
         """Map action name to ActionType."""
@@ -657,6 +792,10 @@ class Agent:
             "memory_store": ActionType.FILE_WRITE,
             "memory_recall": ActionType.SEARCH,
             "memory_list": ActionType.SEARCH,
+            "wm_note": ActionType.PLAN,
+            "wm_artifact": ActionType.PLAN,
+            "wm_remove": ActionType.PLAN,
+            "wm_read": ActionType.SEARCH,
             "plan": ActionType.PLAN,
             "complete": ActionType.VERIFY,
         }
@@ -695,6 +834,9 @@ class Agent:
             "skills": skill_info,
             "mcp": mcp_info,
             "memory": memory_info,
+            "budget": self.budget.snapshot(),
+            "roles": self.role_registry.list_names(),
+            "working_memory": self.working_memory.summary(),
         }
 
     def save_session(self, path: str):

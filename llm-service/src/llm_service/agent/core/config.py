@@ -47,6 +47,11 @@ class AgentConfig:
     max_candidate_pages: int = 5
     max_collab_rounds: int = 1
 
+    # Context budget settings
+    context_window: int = 128_000   # model context window in tokens
+    response_reserve: int = 4_096   # tokens reserved for LLM response
+    auto_compact: bool = True       # auto-compact session when budget exceeded
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AgentConfig":
         mode = data.get("mode", "copilot")
@@ -74,6 +79,9 @@ class AgentConfig:
             max_specialists=data.get("max_specialists", 3),
             max_candidate_pages=data.get("max_candidate_pages", 5),
             max_collab_rounds=data.get("max_collab_rounds", 1),
+            context_window=data.get("context_window", 128_000),
+            response_reserve=data.get("response_reserve", 4_096),
+            auto_compact=data.get("auto_compact", True),
         )
 
 

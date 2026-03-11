@@ -141,38 +141,62 @@ class OpenClawMemory(MemoryStrategy):
     # Prompt context
     # ------------------------------------------------------------------
 
-    def get_prompt_context(self) -> str:
+    def get_prompt_context(self, max_tokens: int = 0) -> str:
         blocks: List[str] = []
         mem = Path(self.memory_dir)
 
-        # MEMORY.md (first N lines)
+        def _est_tokens(text: str) -> int:
+            return max(1, len(text) // 4)
+
+        budget = max_tokens if max_tokens > 0 else float("inf")  # type: ignore[assignment]
+        used = 0
+
+        # MEMORY.md (first N lines, limited by budget)
         memory_md = mem / "MEMORY.md"
         if memory_md.exists():
             try:
                 lines = memory_md.read_text(encoding="utf-8").splitlines()
-                truncated = lines[:MAX_MEMORY_PROMPT_LINES]
-                if len(lines) > MAX_MEMORY_PROMPT_LINES:
+                max_lines = MAX_MEMORY_PROMPT_LINES
+                if budget != float("inf"):
+                    remaining_chars = int((budget - used) * 4)
+                    max_lines = min(max_lines, max(10, remaining_chars // 60))
+                truncated = lines[:max_lines]
+                if len(lines) > max_lines:
                     truncated.append(
-                        f"\n... ({len(lines) - MAX_MEMORY_PROMPT_LINES} more lines — "
+                        f"\n... ({len(lines) - max_lines} more lines — "
                         "use memory_recall to search)"
                     )
                 text = "\n".join(truncated).strip()
                 if text:
-                    blocks.append(f"<!-- MEMORY.md -->\n{text}")
+                    block = f"<!-- MEMORY.md -->\n{text}"
+                    blocks.append(block)
+                    used += _est_tokens(block)
             except Exception:
                 pass
 
         # Today's and yesterday's daily logs
         today = datetime.now()
         for delta in (0, 1):
+            if used >= budget:
+                break
             day = today - timedelta(days=delta)
             day_file = mem / "daily" / f"{day.strftime('%Y-%m-%d')}.md"
             if day_file.is_file():
                 try:
                     text = day_file.read_text(encoding="utf-8").strip()
-                    if text:
-                        label = "today" if delta == 0 else "yesterday"
-                        blocks.append(f"<!-- daily/{day_file.name} ({label}) -->\n{text}")
+                    if not text:
+                        continue
+                    label = "today" if delta == 0 else "yesterday"
+                    block = f"<!-- daily/{day_file.name} ({label}) -->\n{text}"
+                    cost = _est_tokens(block)
+                    if budget != float("inf") and used + cost > budget:
+                        char_remaining = int((budget - used) * 4)
+                        if char_remaining > 80:
+                            block = block[:char_remaining] + "\n... (truncated)"
+                            blocks.append(block)
+                        break
+                    blocks.append(block)
+                    used += cost
                 except Exception:
                     continue
 

@@ -151,32 +151,58 @@ class ClaudeCodeMemory(MemoryStrategy):
     # Prompt context
     # ------------------------------------------------------------------
 
-    def get_prompt_context(self) -> str:
+    def get_prompt_context(self, max_tokens: int = 0) -> str:
         blocks: List[str] = []
 
-        # Load instruction files (full content)
+        def _est_tokens(text: str) -> int:
+            return max(1, len(text) // 4)
+
+        budget = max_tokens if max_tokens > 0 else float("inf")  # type: ignore[assignment]
+        used = 0
+
+        # Load instruction files (full content, but honour budget)
         for fpath in self._instruction_files:
             try:
                 text = Path(fpath).read_text(encoding="utf-8").strip()
-                if text:
-                    blocks.append(f"<!-- {fpath} -->\n{text}")
+                if not text:
+                    continue
+                block = f"<!-- {fpath} -->\n{text}"
+                cost = _est_tokens(block)
+                if budget != float("inf") and used + cost > budget:
+                    # Truncate to fit remaining budget
+                    char_remaining = int((budget - used) * 4)
+                    if char_remaining > 100:
+                        block = block[:char_remaining] + "\n... (truncated to fit context budget)"
+                        blocks.append(block)
+                        used = budget  # type: ignore[assignment]
+                    break
+                blocks.append(block)
+                used += cost
             except Exception:
                 continue
 
-        # Load MEMORY.md (first N lines)
+        # Load MEMORY.md (first N lines, further limited by budget)
         mem_path = Path(self.memory_dir) / "MEMORY.md"
-        if mem_path.exists():
+        if mem_path.exists() and used < budget:
             try:
                 lines = mem_path.read_text(encoding="utf-8").splitlines()
-                truncated = lines[:MAX_MEMORY_PROMPT_LINES]
-                if len(lines) > MAX_MEMORY_PROMPT_LINES:
+                max_lines = MAX_MEMORY_PROMPT_LINES
+                # Tighten line limit when budget is tight
+                if budget != float("inf"):
+                    remaining_chars = int((budget - used) * 4)
+                    # Rough: 60 chars per line average
+                    max_lines = min(max_lines, max(10, remaining_chars // 60))
+                truncated = lines[:max_lines]
+                if len(lines) > max_lines:
                     truncated.append(
-                        f"\n... ({len(lines) - MAX_MEMORY_PROMPT_LINES} more lines — "
+                        f"\n... ({len(lines) - max_lines} more lines — "
                         "use memory_recall to search)"
                     )
                 text = "\n".join(truncated).strip()
                 if text:
-                    blocks.append(f"<!-- MEMORY.md -->\n{text}")
+                    block = f"<!-- MEMORY.md -->\n{text}"
+                    blocks.append(block)
+                    used += _est_tokens(block)
             except Exception:
                 pass
 

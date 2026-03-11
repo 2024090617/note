@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from ..copilot_client import ChatMessage, CopilotBridgeClient
+from .roles import Role, RoleRegistry
 
 
 @dataclass
@@ -16,25 +17,15 @@ class SpecialistReview:
 
 
 class DelegationEngine:
-    """Runs specialist reviews and synthesizes a recommendation."""
+    """Runs specialist reviews and synthesizes a recommendation.
 
-    ROLE_PROMPTS: Dict[str, str] = {
-        "relevance": (
-            "You are a relevance specialist. Rank candidate documentation pages by direct task fit. "
-            "Prioritize practical fixability and task alignment."
-        ),
-        "freshness": (
-            "You are a freshness specialist. Evaluate if candidate pages appear current and safe to trust. "
-            "Use last-updated, version clues, and deprecation signals."
-        ),
-        "applicability": (
-            "You are an implementation specialist. Evaluate whether each candidate solution can be applied quickly "
-            "with low risk and clear steps."
-        ),
-        "security": (
-            "You are a security specialist. Review candidate solutions for security pitfalls and safer alternatives."
-        ),
-    }
+    Uses a :class:`RoleRegistry` for role look-ups instead of a hardcoded
+    dict.  The registry can be shared across the application so roles
+    registered at runtime are immediately available.
+    """
+
+    # Keep a class-level alias for backwards compat (tests, etc.)
+    ROLE_PROMPTS: Dict[str, str] = {}  # populated from registry on access
 
     def __init__(
         self,
@@ -42,11 +33,24 @@ class DelegationEngine:
         model: str,
         max_specialists: int = 3,
         max_collab_rounds: int = 1,
+        registry: Optional[RoleRegistry] = None,
     ):
         self.client = client
         self.model = model
         self.max_specialists = max(1, max_specialists)
         self.max_collab_rounds = max(1, max_collab_rounds)
+        self.registry = registry or RoleRegistry()
+
+    # ── public alias for backward compat ──────────────────────────────
+
+    def get_role_prompts(self) -> Dict[str, str]:
+        """Return a dict of {name: system_prompt} for all review roles."""
+        return {
+            r.name: r.system_prompt
+            for r in self.registry.list_roles(tag="review")
+        }
+
+    # ── main entry point ──────────────────────────────────────────────
 
     def review_candidates(
         self,
@@ -67,7 +71,7 @@ class DelegationEngine:
 
         for role in specialist_roles:
             review_text = self._run_specialist(role, task, normalized_candidates)
-            specialist_reviews.append(SpecialistReview(role=role, content=review_text))
+            specialist_reviews.append(SpecialistReview(role=role.name, content=review_text))
 
         synthesis_text = self._synthesize(task, normalized_candidates, specialist_reviews)
         return {
@@ -78,22 +82,64 @@ class DelegationEngine:
             "synthesis": synthesis_text,
         }
 
-    def _select_roles(self, task: str, focus: Optional[List[str]]) -> List[str]:
+    # ── extraction helper (map-reduce page analysis) ──────────────────
+
+    def extract_page(self, raw_content: str, task: str = "") -> str:
+        """Run the extraction specialist on a single raw page.
+
+        Useful for map-reduce: call this per page in a sub-agent, then
+        only pass compact extractions into the main context.
+        """
+        extraction_role = self.registry.get("extraction")
+        if extraction_role is None:
+            # Fallback inline prompt
+            prompt = (
+                "Extract key facts, actionable steps, config snippets, "
+                "and owner/contact info from the following documentation. "
+                "Output a concise structured summary."
+            )
+        else:
+            prompt = extraction_role.system_prompt
+
+        user_msg = raw_content
+        if task:
+            user_msg = f"Task context: {task}\n\n---\n\n{raw_content}"
+
+        messages = [
+            ChatMessage(role="system", content=prompt),
+            ChatMessage(role="user", content=user_msg[:6000]),
+        ]
+        response = self.client.chat(messages, model=self.model)
+        return response.content
+
+    # ── role selection ────────────────────────────────────────────────
+
+    def _select_roles(self, task: str, focus: Optional[List[str]]) -> List[Role]:
         """Select specialist roles based on focus and task intent."""
-        selected: List[str] = []
+        selected: List[Role] = []
+        seen: set = set()
 
         if focus:
             for item in focus:
                 key = str(item).strip().lower()
-                if key in self.ROLE_PROMPTS and key not in selected:
-                    selected.append(key)
+                role = self.registry.get(key)
+                if role and key not in seen:
+                    selected.append(role)
+                    seen.add(key)
 
         task_lower = task.lower()
-        if "security" in task_lower and "security" not in selected:
-            selected.append("security")
+        if "security" in task_lower and "security" not in seen:
+            role = self.registry.get("security")
+            if role:
+                selected.append(role)
+                seen.add("security")
 
         if not selected:
-            selected = ["relevance", "freshness", "applicability"]
+            # Default to the three standard review roles
+            for name in ("relevance", "freshness", "applicability"):
+                role = self.registry.get(name)
+                if role:
+                    selected.append(role)
 
         return selected[: self.max_specialists]
 
@@ -133,15 +179,14 @@ class DelegationEngine:
 
     def _run_specialist(
         self,
-        role: str,
+        role: Role,
         task: str,
         candidates: List[Dict[str, str]],
     ) -> str:
         """Run one specialist review."""
-        prompt = self.ROLE_PROMPTS.get(role, self.ROLE_PROMPTS["relevance"])
         payload = {
             "task": task,
-            "role": role,
+            "role": role.name,
             "candidates": candidates,
             "instructions": [
                 "Rank top 3 candidates with rationale.",
@@ -152,7 +197,7 @@ class DelegationEngine:
         }
 
         messages = [
-            ChatMessage(role="system", content=prompt),
+            ChatMessage(role="system", content=role.system_prompt),
             ChatMessage(role="user", content=json.dumps(payload, ensure_ascii=False)),
         ]
         response = self.client.chat(messages, model=self.model)
@@ -165,11 +210,17 @@ class DelegationEngine:
         specialist_reviews: List[SpecialistReview],
     ) -> str:
         """Synthesize specialist outputs into one recommendation."""
+        # Use the synthesizer role from the registry if available
+        synth_role = self.registry.get("synthesizer")
+        if synth_role:
+            synthesis_prompt = synth_role.system_prompt
+        else:
+            synthesis_prompt = (
+                "You are a lead engineer synthesizing specialist reviews. "
+                "Return: best page(s), final recommended solution, confidence, risks, and owner/contact list."
+            )
+
         review_payload = [{"role": item.role, "review": item.content} for item in specialist_reviews]
-        synthesis_prompt = (
-            "You are a lead engineer synthesizing specialist reviews. "
-            "Return: best page(s), final recommended solution, confidence, risks, and owner/contact list."
-        )
         synthesis_input = {
             "task": task,
             "candidates": candidates,
