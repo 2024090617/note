@@ -52,6 +52,11 @@ class AgentConfig:
     response_reserve: int = 4_096   # tokens reserved for LLM response
     auto_compact: bool = True       # auto-compact session when budget exceeded
 
+    # Topic-isolated context settings
+    context_recent_messages: int = 4
+    context_retrieval_limit: int = 4
+    topic_shift_threshold: float = 0.55
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AgentConfig":
         mode = data.get("mode", "copilot")
@@ -82,6 +87,9 @@ class AgentConfig:
             context_window=data.get("context_window", 128_000),
             response_reserve=data.get("response_reserve", 4_096),
             auto_compact=data.get("auto_compact", True),
+            context_recent_messages=data.get("context_recent_messages", 4),
+            context_retrieval_limit=data.get("context_retrieval_limit", 4),
+            topic_shift_threshold=data.get("topic_shift_threshold", 0.55),
         )
 
 

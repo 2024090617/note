@@ -6,6 +6,7 @@ from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional
+from uuid import uuid4
 
 from .types import Action, ActionType, Message
 from .state import SessionState
@@ -34,18 +35,104 @@ class Session:
     messages: List[Message] = field(default_factory=list)
     actions: List[Action] = field(default_factory=list)
     state: SessionState = field(default_factory=SessionState)
+    threads: List[Dict[str, Any]] = field(default_factory=list)
+    current_thread_id: Optional[str] = None
+    focus_thread_id: Optional[str] = None  # None = current thread only
+    checkpoints: List[Dict[str, Any]] = field(default_factory=list)
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
 
     # Compaction tracking
     _compaction_count: int = field(default=0, init=False, repr=False)
 
-    def add_message(self, role: str, content: str) -> Message:
+    def __post_init__(self):
+        """Ensure thread metadata is initialized for backward compatibility."""
+        if not self.threads:
+            default = self.create_thread("general")
+            self.current_thread_id = default["id"]
+        elif not self.current_thread_id:
+            self.current_thread_id = self.threads[0]["id"]
+
+    def add_message(self, role: str, content: str, thread_id: Optional[str] = None) -> Message:
         """Add a message to the conversation."""
-        msg = Message(role=role, content=content)
+        target_thread = thread_id or self.current_thread_id
+        msg = Message(role=role, content=content, thread_id=target_thread)
         self.messages.append(msg)
+        if target_thread:
+            self.touch_thread(target_thread)
         self.updated_at = datetime.now().isoformat()
         return msg
+
+    def create_thread(self, topic: str, switch: bool = True) -> Dict[str, Any]:
+        """Create a new conversation thread."""
+        thread = {
+            "id": f"th_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}",
+            "topic": topic.strip() or "general",
+            "summary": "",
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+        }
+        self.threads.append(thread)
+        if switch:
+            self.current_thread_id = thread["id"]
+        self.updated_at = datetime.now().isoformat()
+        return thread
+
+    def touch_thread(self, thread_id: str) -> None:
+        """Update thread activity timestamp."""
+        for thread in self.threads:
+            if thread["id"] == thread_id:
+                thread["updated_at"] = datetime.now().isoformat()
+                return
+
+    def get_current_thread(self) -> Optional[Dict[str, Any]]:
+        """Return the active conversation thread."""
+        if not self.current_thread_id:
+            return None
+        for thread in self.threads:
+            if thread["id"] == self.current_thread_id:
+                return thread
+        return None
+
+    def set_current_thread(self, identifier: str) -> bool:
+        """Switch current thread by id or topic name."""
+        for thread in self.threads:
+            if thread["id"] == identifier:
+                self.current_thread_id = thread["id"]
+                self.updated_at = datetime.now().isoformat()
+                return True
+
+        for thread in reversed(self.threads):
+            if thread["topic"] == identifier:
+                self.current_thread_id = thread["id"]
+                self.updated_at = datetime.now().isoformat()
+                return True
+
+        return False
+
+    def set_focus(self, value: Optional[str]) -> None:
+        """Configure retrieval focus: None=current, 'all'=cross-thread, or thread id."""
+        if not value or value == "current":
+            self.focus_thread_id = None
+        elif value == "all":
+            self.focus_thread_id = "all"
+        else:
+            self.focus_thread_id = value
+        self.updated_at = datetime.now().isoformat()
+
+    def get_thread_messages(
+        self,
+        thread_id: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> List[Message]:
+        """Get messages for a thread, defaulting to current thread."""
+        tid = thread_id or self.current_thread_id
+        filtered = [
+            msg for msg in self.messages if (msg.thread_id == tid or (msg.thread_id is None and tid == self.current_thread_id))
+        ]
+        if limit is not None:
+            return filtered[-limit:]
+        return filtered
 
     def add_action(
         self,
@@ -73,7 +160,7 @@ class Session:
         if self.system_prompt:
             result.append({"role": "system", "content": self.system_prompt})
 
-        for msg in self.messages:
+        for msg in self.get_thread_messages():
             result.append({"role": msg.role, "content": msg.content})
 
         return result
@@ -96,12 +183,15 @@ class Session:
         Returns the summary text that replaced the old messages, or empty
         string if compaction was not needed (too few messages).
         """
+        current_tid = self.current_thread_id
+        thread_messages = self.get_thread_messages(thread_id=current_tid)
+
         # Need at least keep_recent + 2 messages to be worth compacting
-        if len(self.messages) <= keep_recent + 2:
+        if len(thread_messages) <= keep_recent + 2:
             return ""
 
-        old_messages = self.messages[: -keep_recent] if keep_recent > 0 else self.messages[:]
-        recent_messages = self.messages[-keep_recent:] if keep_recent > 0 else []
+        old_messages = thread_messages[: -keep_recent] if keep_recent > 0 else thread_messages[:]
+        recent_messages = thread_messages[-keep_recent:] if keep_recent > 0 else []
 
         # Build a compact summary of old messages
         summary_lines: List[str] = [
@@ -120,8 +210,16 @@ class Session:
         summary_text = "\n".join(summary_lines)
 
         # Replace old messages with one summary message
-        summary_msg = Message(role="user", content=summary_text)
-        self.messages = [summary_msg] + recent_messages
+        summary_msg = Message(role="user", content=summary_text, thread_id=current_tid)
+        old_ids = {m.id for m in old_messages}
+        survivors = [m for m in self.messages if m.id not in old_ids]
+        insert_at = 0
+        for idx, msg in enumerate(survivors):
+            if msg.thread_id == current_tid:
+                insert_at = idx
+                break
+        survivors.insert(insert_at, summary_msg)
+        self.messages = survivors
         self._compaction_count += 1
         self.updated_at = datetime.now().isoformat()
 
@@ -149,6 +247,51 @@ class Session:
         self.state.open_questions = []
         self.updated_at = datetime.now().isoformat()
 
+    def create_checkpoint(
+        self,
+        label: str,
+        working_memory: Optional[Dict[str, Any]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Capture a checkpoint snapshot for task continuation."""
+        checkpoint = {
+            "id": f"cp_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}",
+            "label": label.strip() or "checkpoint",
+            "created_at": datetime.now().isoformat(),
+            "goal": self.state.goal,
+            "state": self.state.to_dict(),
+            "message_count": len(self.messages),
+            "action_count": len(self.actions),
+            "working_memory": working_memory,
+            "metadata": metadata or {},
+        }
+        self.checkpoints.append(checkpoint)
+        self.updated_at = datetime.now().isoformat()
+        return checkpoint
+
+    def list_checkpoints(self) -> List[Dict[str, Any]]:
+        """List all checkpoints in creation order."""
+        return list(self.checkpoints)
+
+    def get_checkpoint(self, identifier: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Resolve a checkpoint by id, label, or latest when omitted."""
+        if not self.checkpoints:
+            return None
+
+        if not identifier:
+            return self.checkpoints[-1]
+
+        for checkpoint in self.checkpoints:
+            if checkpoint.get("id") == identifier:
+                return checkpoint
+
+        # If a label is provided, return the latest checkpoint with that label.
+        for checkpoint in reversed(self.checkpoints):
+            if checkpoint.get("label") == identifier:
+                return checkpoint
+
+        return None
+
     def to_dict(self) -> Dict[str, Any]:
         """Serialize session to dictionary."""
         return {
@@ -160,6 +303,10 @@ class Session:
             "messages": [m.to_dict() for m in self.messages],
             "actions": [a.to_dict() for a in self.actions],
             "state": self.state.to_dict(),
+            "threads": list(self.threads),
+            "current_thread_id": self.current_thread_id,
+            "focus_thread_id": self.focus_thread_id,
+            "checkpoints": list(self.checkpoints),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -176,6 +323,10 @@ class Session:
             messages=[Message.from_dict(m) for m in data.get("messages", [])],
             actions=[Action.from_dict(a) for a in data.get("actions", [])],
             state=SessionState.from_dict(data.get("state", {})),
+            threads=list(data.get("threads", [])),
+            current_thread_id=data.get("current_thread_id"),
+            focus_thread_id=data.get("focus_thread_id"),
+            checkpoints=list(data.get("checkpoints", [])),
             created_at=data.get("created_at", datetime.now().isoformat()),
             updated_at=data.get("updated_at", datetime.now().isoformat()),
         )
@@ -201,6 +352,9 @@ class Session:
             f"model:{self.model}",
             f"dir:{Path(self.workdir).name}",
         ]
+        current = self.get_current_thread()
+        if current:
+            parts.append(f"topic:{current['topic']}")
         if self.state.git_branch:
             dirty = "*" if self.state.git_dirty else ""
             parts.append(f"git:{self.state.git_branch}{dirty}")

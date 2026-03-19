@@ -4,6 +4,7 @@ from datetime import datetime
 from enum import Enum
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional
+from uuid import uuid4
 
 
 class ActionType(str, Enum):
@@ -59,19 +60,25 @@ class Message:
 
     role: str  # "system", "user", "assistant"
     content: str
+    id: str = field(default_factory=lambda: f"msg_{uuid4().hex[:12]}")
+    thread_id: Optional[str] = None
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "id": self.id,
             "role": self.role,
             "content": self.content,
+            "thread_id": self.thread_id,
             "timestamp": self.timestamp,
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Message":
         return cls(
+            id=data.get("id", f"msg_{uuid4().hex[:12]}"),
             role=data["role"],
             content=data["content"],
+            thread_id=data.get("thread_id"),
             timestamp=data.get("timestamp", datetime.now().isoformat()),
         )

@@ -28,6 +28,11 @@ class CommandHandler:
             "model": self.cmd_model,
             "system": self.cmd_system,
             "task": self.cmd_task,
+            "checkpoint": self.cmd_checkpoint,
+            "checkpoints": self.cmd_checkpoints,
+            "resume": self.cmd_resume,
+            "new-topic": self.cmd_new_topic,
+            "focus": self.cmd_focus,
             "open": self.cmd_open,
             "search": self.cmd_search,
             "diff": self.cmd_diff,
@@ -40,6 +45,7 @@ class CommandHandler:
             "confirm": self.cmd_confirm,
             "rollback": self.cmd_rollback,
             "clear": self.cmd_clear,
+            "reset": self.cmd_clear,
             "models": self.cmd_models,
             "logs": self.cmd_logs,
         }
@@ -73,6 +79,7 @@ class CommandHandler:
   /quit, /exit       Exit the agent
   /status            Show current mode, model, workdir, git status
   /clear             Clear conversation history
+    /reset             Alias of /clear
 
 [bold]Configuration:[/bold]
   /mode <copilot|github-models>   Switch backend mode
@@ -82,6 +89,12 @@ class CommandHandler:
 
 [bold]Task Management:[/bold]
   /task <description|@file>       Start a new autonomous task
+    /task --continue [update]       Continue current task goal/state
+    /checkpoint [label]             Create a manual checkpoint
+    /checkpoints                    List available checkpoints
+    /resume <id|label> [update]     Resume from checkpoint and continue
+    /new-topic <name>               Start a new isolated topic thread
+    /focus <current|all|id|topic>   Control retrieval scope
   /save <path>                    Save session to file
   /load <path>                    Load session from file
 
@@ -126,6 +139,9 @@ class CommandHandler:
         table.add_row("Messages", str(status["messages"]))
         table.add_row("Actions", str(status["actions"]))
         table.add_row("State", status["state"])
+        table.add_row("Topic", str(status.get("current_topic") or "general"))
+        table.add_row("Focus", str(status.get("focus") or "current"))
+        table.add_row("Threads", str(status.get("threads") or 1))
 
         # Logging status
         log_enabled = "✓" if self.agent.config.log_to_file else "✗"
@@ -211,12 +227,25 @@ class CommandHandler:
     def cmd_task(self, args: str) -> bool:
         """Start an autonomous task."""
         if not args:
-            console.print("Usage: /task <description> or /task @file.txt")
+            console.print("Usage: /task <description> | /task --continue [update] | /task @file.txt")
             return True
 
+        continue_mode = False
+        continue_note = None
+        raw_args = args.strip()
+
+        if raw_args.startswith("--continue"):
+            continue_mode = True
+            continue_note = raw_args[len("--continue") :].strip() or None
+            if not self.agent.session.state.goal:
+                console.print("[red]No active task goal to continue. Start with /task <description> first.[/red]")
+                return True
+            task = self.agent.session.state.goal
+        else:
+            task = args
+
         # Load task from file if specified
-        task = args
-        if args.startswith("@"):
+        if not continue_mode and args.startswith("@"):
             filepath = args[1:].strip()
             try:
                 with open(filepath, "r") as f:
@@ -225,7 +254,11 @@ class CommandHandler:
                 console.print(f"[red]Error loading file: {e}[/red]")
                 return True
 
-        console.print(Panel(f"[bold]Starting task:[/bold]\n{task[:200]}...", title="Task"))
+        if continue_mode:
+            preview = continue_note or "Resume with current context"
+            console.print(Panel(f"[bold]Continuing task:[/bold]\n{preview[:200]}...", title="Task"))
+        else:
+            console.print(Panel(f"[bold]Starting task:[/bold]\n{task[:200]}...", title="Task"))
 
         # Run the task with progress updates
         def on_thought(data):
@@ -244,7 +277,11 @@ class CommandHandler:
         self.agent.on("error", on_error)
 
         with console.status("[bold blue]Working on task...", spinner="dots"):
-            result = self.agent.run_task(task)
+            result = self.agent.run_task(
+                task,
+                preserve_state=continue_mode,
+                continuation_note=continue_note,
+            )
 
         if result.summary:
             console.print(Panel(Markdown(result.summary), title="[bold green]Task Result[/bold green]"))
@@ -252,6 +289,120 @@ class CommandHandler:
         if result.error:
             console.print(f"[yellow]Note: {result.error}[/yellow]")
 
+        return True
+
+    def cmd_checkpoint(self, args: str) -> bool:
+        """Create a manual checkpoint."""
+        label = args.strip() if args and args.strip() else "manual"
+        checkpoint = self.agent.create_checkpoint(label, metadata={"source": "manual"})
+        console.print(
+            "[green]Checkpoint created[/green] "
+            f"({checkpoint['id']}, label={checkpoint['label']}, goal={checkpoint.get('goal') or 'none'})"
+        )
+        return True
+
+    def cmd_checkpoints(self, args: str) -> bool:
+        """List all checkpoints."""
+        checkpoints = self.agent.list_checkpoints()
+        if not checkpoints:
+            console.print("[yellow]No checkpoints available[/yellow]")
+            return True
+
+        table = Table(title="Task Checkpoints")
+        table.add_column("ID", style="cyan")
+        table.add_column("Label", style="green")
+        table.add_column("Goal")
+        table.add_column("Messages")
+        table.add_column("Created")
+
+        for cp in checkpoints[-20:]:
+            table.add_row(
+                cp.get("id", "n/a"),
+                cp.get("label", "n/a"),
+                (cp.get("goal") or "")[:50],
+                str(cp.get("message_count", 0)),
+                (cp.get("created_at") or "")[:19],
+            )
+
+        console.print(table)
+        return True
+
+    def cmd_resume(self, args: str) -> bool:
+        """Resume from a checkpoint and continue task execution."""
+        raw = args.strip()
+        if not raw:
+            console.print("Usage: /resume <id|label> [update]")
+            return True
+
+        parts = raw.split(maxsplit=1)
+        checkpoint_id = parts[0]
+        update = parts[1].strip() if len(parts) > 1 else None
+
+        try:
+            checkpoint = self.agent.resume_checkpoint(checkpoint_id)
+        except Exception as e:
+            console.print(f"[red]Error resuming checkpoint: {e}[/red]")
+            return True
+
+        console.print(
+            "[green]Resumed checkpoint[/green] "
+            f"({checkpoint.get('id')}, label={checkpoint.get('label')})"
+        )
+
+        task_goal = self.agent.session.state.goal
+        if not task_goal:
+            console.print("[yellow]Checkpoint has no goal. Use /task <description> to start a task.[/yellow]")
+            return True
+
+        with console.status("[bold blue]Continuing resumed task...", spinner="dots"):
+            result = self.agent.run_task(
+                task_goal,
+                preserve_state=True,
+                continuation_note=update,
+            )
+
+        if result.summary:
+            console.print(Panel(Markdown(result.summary), title="[bold green]Resumed Task Result[/bold green]"))
+        if result.error:
+            console.print(f"[yellow]Note: {result.error}[/yellow]")
+        return True
+
+    def cmd_new_topic(self, args: str) -> bool:
+        """Create and switch to a new topic thread."""
+        topic = args.strip() if args and args.strip() else "general"
+        thread = self.agent.session.create_thread(topic=topic, switch=True)
+        console.print(
+            f"[green]Switched to new topic[/green] "
+            f"({thread['topic']}, id={thread['id']})"
+        )
+        return True
+
+    def cmd_focus(self, args: str) -> bool:
+        """Set retrieval focus scope."""
+        value = args.strip() if args else ""
+        if not value:
+            current = self.agent.session.focus_thread_id or "current"
+            console.print(f"Current focus: [cyan]{current}[/cyan]")
+            console.print("Usage: /focus <current|all|thread_id|topic>")
+            return True
+
+        if value in ("current", "all"):
+            self.agent.session.set_focus(value)
+            console.print(f"[green]Focus set to {value}[/green]")
+            return True
+
+        if self.agent.session.set_current_thread(value):
+            self.agent.session.set_focus("current")
+            thread = self.agent.session.get_current_thread() or {}
+            console.print(
+                f"[green]Switched to topic[/green] "
+                f"({thread.get('topic', 'unknown')}, id={thread.get('id', 'n/a')})"
+            )
+            return True
+
+        # Keep current thread but set explicit focus value (thread id expected)
+        self.agent.session.set_focus(value)
+        console.print(f"[yellow]Set explicit focus to '{value}'[/yellow]")
         return True
 
     def cmd_open(self, args: str) -> bool:

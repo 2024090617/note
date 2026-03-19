@@ -13,6 +13,7 @@ from ..logger import AgentLogger, LogLevel
 from ..skills import create_skill_manager
 from ..mcp import MCPManager
 from ..memory import create_memory_manager, MemoryStrategy
+from ..context import TopicDetector, ConversationIndex
 
 from .config import AgentConfig, AgentMode, AgentResponse
 from .delegation import DelegationEngine
@@ -99,6 +100,10 @@ class Agent:
             max_tokens=self.budget.limit("working_memory"),
         )
 
+        # Topic isolation + retrieval index
+        self.topic_detector = TopicDetector(threshold=self.config.topic_shift_threshold)
+        self.conversation_index = ConversationIndex(workdir=self.config.workdir)
+
     @property
     def client(self) -> CopilotBridgeClient:
         """Get or create LLM client."""
@@ -159,6 +164,7 @@ class Agent:
         self.config.workdir = str(Path(path).resolve())
         self.session.workdir = self.config.workdir
         self.tools.set_workdir(self.config.workdir)
+        self.conversation_index = ConversationIndex(workdir=self.config.workdir)
 
     def set_system_prompt(self, prompt: str):
         """Set system prompt."""
@@ -175,8 +181,88 @@ class Agent:
         Returns:
             Assistant response
         """
-        self.session.add_message("user", user_input)
+        recent_context = "\n".join(
+            m.content
+            for m in self.session.get_thread_messages(limit=self.config.context_recent_messages)
+            if m.role == "user"
+        )
+        if self.topic_detector.is_topic_shift(recent_context, user_input):
+            self.session.create_thread(topic=self._topic_label_from_message(user_input), switch=True)
 
+        user_msg = self.session.add_message("user", user_input)
+        if user_msg.thread_id:
+            self.conversation_index.index_message(
+                message_id=user_msg.id,
+                thread_id=user_msg.thread_id,
+                role=user_msg.role,
+                content=user_msg.content,
+            )
+
+        messages = self._build_curated_chat_messages(query=user_input)
+
+        try:
+            response = self.client.chat(messages, model=self.config.model)
+            assistant_msg = self.session.add_message("assistant", response.content)
+            if assistant_msg.thread_id:
+                self.conversation_index.index_message(
+                    message_id=assistant_msg.id,
+                    thread_id=assistant_msg.thread_id,
+                    role=assistant_msg.role,
+                    content=assistant_msg.content,
+                )
+            return response.content
+        except CopilotBridgeError as e:
+            error_msg = f"Error: {e}"
+            return error_msg
+
+    def _topic_label_from_message(self, text: str) -> str:
+        """Derive a short topic slug from user input."""
+        words = re.findall(r"\w+", text.lower())
+        return "-".join(words[:4]) if words else "general"
+
+    def _build_retrieved_context_block(self, query: str) -> str:
+        """Build retrieval block from indexed conversation and memory."""
+        scope = self.session.focus_thread_id
+        if scope in (None, "current"):
+            thread_scope = self.session.current_thread_id
+        elif scope == "all":
+            thread_scope = None
+        else:
+            thread_scope = scope
+
+        snippets = self.conversation_index.search(
+            query=query,
+            limit=self.config.context_retrieval_limit,
+            thread_id=thread_scope,
+        )
+
+        lines: List[str] = []
+        if snippets:
+            lines.append("<retrieved_conversation>")
+            for item in snippets:
+                doc_id = str(item.get("doc_id", ""))
+                content = str(item.get("content", "")).replace("\n", " ").strip()
+                lines.append(f"  <snippet source=\"{doc_id}\">{content[:280]}</snippet>")
+            lines.append("</retrieved_conversation>")
+
+        if self.memory_manager:
+            try:
+                memories = self.memory_manager.recall(query, limit=3)
+            except Exception:
+                memories = []
+            if memories:
+                lines.append("<retrieved_memory>")
+                for mem in memories:
+                    source = mem.source or "memory"
+                    lines.append(
+                        f"  <memory source=\"{source}\" score=\"{mem.score:.2f}\">{mem.content[:240]}</memory>"
+                    )
+                lines.append("</retrieved_memory>")
+
+        return "\n".join(lines)
+
+    def _build_curated_chat_messages(self, query: str) -> List[ChatMessage]:
+        """Build thread-scoped chat messages with optional retrieval context."""
         messages = [
             ChatMessage(
                 role="system",
@@ -184,43 +270,98 @@ class Agent:
             ),
         ]
 
-        for msg in self.session.messages:
+        retrieved = self._build_retrieved_context_block(query)
+        if retrieved:
+            messages.append(
+                ChatMessage(
+                    role="system",
+                    content=(
+                        "Use retrieved context only when relevant to the latest query. "
+                        "If unrelated, ignore stale snippets.\n"
+                        f"{retrieved}"
+                    ),
+                )
+            )
+
+        for msg in self.session.get_thread_messages(limit=self.config.context_recent_messages):
             messages.append(ChatMessage(role=msg.role, content=msg.content))
+        return messages
 
-        try:
-            response = self.client.chat(messages, model=self.config.model)
-            self.session.add_message("assistant", response.content)
-            return response.content
-        except CopilotBridgeError as e:
-            error_msg = f"Error: {e}"
-            return error_msg
-
-    def run_task(self, task: str, max_iterations: Optional[int] = None) -> AgentResponse:
+    def run_task(
+        self,
+        task: str,
+        max_iterations: Optional[int] = None,
+        preserve_state: bool = False,
+        continuation_note: Optional[str] = None,
+    ) -> AgentResponse:
         """
         Run an autonomous task using the ReAct loop.
 
         Args:
             task: Task description
             max_iterations: Maximum iterations (overrides config)
+            preserve_state: Keep previous goal/state/working memory for continuation
+            continuation_note: Additional continuation guidance for resumed runs
 
         Returns:
             Final AgentResponse
         """
         max_iter = max_iterations or self.config.max_iterations
-        self.session.set_goal(task)
+        effective_goal = task
+        if preserve_state and self.session.state.goal:
+            effective_goal = self.session.state.goal
+        else:
+            self.session.set_goal(task)
 
-        # Sync goal into working memory (clears previous task's scratch-pad)
-        self.working_memory.clear()
-        self.working_memory.set_goal(task)
+        # Reset task-scoped scratch-pad only for new tasks.
+        if preserve_state:
+            if not self.working_memory.goal:
+                self.working_memory.set_goal(effective_goal)
+        else:
+            self.working_memory.clear()
+            self.working_memory.set_goal(effective_goal)
+
+        self.create_checkpoint(
+            "task_start",
+            metadata={
+                "preserve_state": preserve_state,
+                "task": task,
+            },
+        )
 
         # Start logging the interaction
-        self.logger.start_interaction(self.session.id, task)
+        self.logger.start_interaction(self.session.id, effective_goal)
 
         # Initial prompt with task
-        self.session.add_message(
-            "user",
-            f"Task: {task}\n\nPlease analyze this task and create a plan, then execute it step by step.",
-        )
+        if preserve_state:
+            continuation_parts = [
+                f"Resume task goal: {effective_goal}",
+                "Continue from the existing plan/state and improve the current solution.",
+            ]
+            if continuation_note:
+                continuation_parts.append(f"Continuation update: {continuation_note}")
+            elif task and task != effective_goal:
+                continuation_parts.append(f"Continuation update: {task}")
+            resume_msg = self.session.add_message("user", "\n".join(continuation_parts))
+            if resume_msg.thread_id:
+                self.conversation_index.index_message(
+                    message_id=resume_msg.id,
+                    thread_id=resume_msg.thread_id,
+                    role=resume_msg.role,
+                    content=resume_msg.content,
+                )
+        else:
+            task_msg = self.session.add_message(
+                "user",
+                f"Task: {task}\n\nPlease analyze this task and create a plan, then execute it step by step.",
+            )
+            if task_msg.thread_id:
+                self.conversation_index.index_message(
+                    message_id=task_msg.id,
+                    thread_id=task_msg.thread_id,
+                    role=task_msg.role,
+                    content=task_msg.content,
+                )
 
         self._emit("task_start", {"task": task})
 
@@ -233,6 +374,10 @@ class Agent:
 
                 if response.error:
                     self._emit("error", {"error": response.error})
+                    self.create_checkpoint(
+                        "task_failed",
+                        metadata={"error": response.error, "iteration": iteration + 1},
+                    )
                     self.logger.end_interaction(status="failed", error=response.error)
                     return response
 
@@ -244,6 +389,10 @@ class Agent:
                 # Check if complete
                 if response.is_complete:
                     self._emit("task_complete", {"summary": response.summary})
+                    self.create_checkpoint(
+                        "task_complete",
+                        metadata={"iteration": iteration + 1},
+                    )
                     self.logger.log_iteration(
                         iteration=iteration + 1,
                         thought=response.thought,
@@ -285,7 +434,14 @@ class Agent:
 
                     # Add observation to conversation
                     obs_message = f"Observation from {response.action}:\n{response.action_result}"
-                    self.session.add_message("user", obs_message)
+                    obs_msg = self.session.add_message("user", obs_message)
+                    if obs_msg.thread_id:
+                        self.conversation_index.index_message(
+                            message_id=obs_msg.id,
+                            thread_id=obs_msg.thread_id,
+                            role=obs_msg.role,
+                            content=obs_msg.content,
+                        )
 
                     # Log action to session
                     self.session.add_action(
@@ -307,6 +463,7 @@ class Agent:
                 )
 
             # Max iterations reached
+            self.create_checkpoint("task_incomplete", metadata={"error": "max_iterations_exceeded"})
             self.logger.end_interaction(status="incomplete", error="max_iterations_exceeded")
             return AgentResponse(
                 is_complete=True,
@@ -314,8 +471,45 @@ class Agent:
                 error="max_iterations_exceeded",
             )
         except Exception as e:
+            self.create_checkpoint("task_failed", metadata={"error": str(e)})
             self.logger.end_interaction(status="failed", error=str(e))
             raise
+
+    def create_checkpoint(
+        self,
+        label: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Create a continuation checkpoint for the current session."""
+        checkpoint = self.session.create_checkpoint(
+            label=label,
+            working_memory=self.working_memory.to_dict(),
+            metadata=metadata,
+        )
+        self.logger.debug(f"Checkpoint created: {checkpoint['id']} ({checkpoint['label']})")
+        return checkpoint
+
+    def list_checkpoints(self) -> List[Dict[str, Any]]:
+        """List available checkpoints."""
+        return self.session.list_checkpoints()
+
+    def resume_checkpoint(self, identifier: Optional[str] = None) -> Dict[str, Any]:
+        """Restore task state from a checkpoint by id or label."""
+        checkpoint = self.session.get_checkpoint(identifier)
+        if not checkpoint:
+            raise ValueError(f"Checkpoint not found: {identifier}" if identifier else "No checkpoints available")
+
+        self.session.state = SessionState.from_dict(checkpoint.get("state", {}))
+        wm_snapshot = checkpoint.get("working_memory")
+        if wm_snapshot:
+            self.working_memory = WorkingMemory.from_dict(
+                wm_snapshot,
+                max_items=self.working_memory.max_items,
+                max_tokens=self.working_memory.max_tokens,
+            )
+
+        self.logger.info(f"Resumed from checkpoint {checkpoint.get('id')} ({checkpoint.get('label')})")
+        return checkpoint
 
     def _build_system_prompt(self) -> str:
         """Build system prompt with available skills and MCP tools injected.
@@ -389,7 +583,7 @@ class Agent:
         system_prompt = self._build_system_prompt()
 
         # Record history token usage *before* deciding to compact
-        history_text = "\n".join(m.content for m in self.session.messages)
+        history_text = "\n".join(m.content for m in self.session.get_thread_messages())
         self.budget.record("history", history_text)
 
         # Auto-compact if over budget
@@ -407,14 +601,14 @@ class Agent:
                     pass
             self.session.compact()
             # Re-record history after compaction
-            history_text = "\n".join(m.content for m in self.session.messages)
+            history_text = "\n".join(m.content for m in self.session.get_thread_messages())
             self.budget.record("history", history_text)
 
         messages = [
             ChatMessage(role="system", content=system_prompt),
         ]
 
-        for msg in self.session.messages:
+        for msg in self.session.get_thread_messages():
             messages.append(ChatMessage(role=msg.role, content=msg.content))
 
         # Log the request
@@ -435,7 +629,14 @@ class Agent:
                 duration_ms=duration_ms,
             )
 
-            self.session.add_message("assistant", content)
+            assistant_msg = self.session.add_message("assistant", content)
+            if assistant_msg.thread_id:
+                self.conversation_index.index_message(
+                    message_id=assistant_msg.id,
+                    thread_id=assistant_msg.thread_id,
+                    role=assistant_msg.role,
+                    content=assistant_msg.content,
+                )
 
             return self._parse_response(content)
 
@@ -681,7 +882,11 @@ class Agent:
         if not query:
             return ToolResult(False, "", "query is required")
         try:
-            entries = self.memory_manager.recall(query, limit=limit)
+            thread = self.session.get_current_thread()
+            scoped_query = query
+            if thread and thread.get("topic"):
+                scoped_query = f"{query} {thread['topic']}"
+            entries = self.memory_manager.recall(scoped_query, limit=limit)
             if not entries:
                 return ToolResult(True, "No matching memories found.")
             lines = [f"Found {len(entries)} memories:"]
@@ -837,6 +1042,9 @@ class Agent:
             "budget": self.budget.snapshot(),
             "roles": self.role_registry.list_names(),
             "working_memory": self.working_memory.summary(),
+            "threads": len(self.session.threads),
+            "current_topic": (self.session.get_current_thread() or {}).get("topic"),
+            "focus": self.session.focus_thread_id or "current",
         }
 
     def save_session(self, path: str):
@@ -850,3 +1058,14 @@ class Agent:
         self.config.model = self.session.model
         self.config.workdir = self.session.workdir
         self.tools.set_workdir(self.session.workdir)
+        self.conversation_index = ConversationIndex(workdir=self.config.workdir)
+        for msg in self.session.messages:
+            target_thread = msg.thread_id or self.session.current_thread_id
+            if not target_thread:
+                continue
+            self.conversation_index.index_message(
+                message_id=msg.id,
+                thread_id=target_thread,
+                role=msg.role,
+                content=msg.content,
+            )
