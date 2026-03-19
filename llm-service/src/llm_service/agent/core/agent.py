@@ -238,7 +238,8 @@ class Agent:
 
         lines: List[str] = []
         if snippets:
-            lines.append("<retrieved_conversation>")
+            scope_label = thread_scope or "all"
+            lines.append(f"<retrieved_conversation scope=\"{scope_label}\">")
             for item in snippets:
                 doc_id = str(item.get("doc_id", ""))
                 content = str(item.get("content", "")).replace("\n", " ").strip()
@@ -269,6 +270,22 @@ class Agent:
                 content=self.session.system_prompt or DEVELOPER_AGENT_SYSTEM_PROMPT,
             ),
         ]
+
+        current_thread = self.session.get_current_thread() or {}
+        thread_topic = current_thread.get("topic", "general")
+        thread_summary = current_thread.get("summary") or ""
+        if thread_summary:
+            messages.append(
+                ChatMessage(
+                    role="system",
+                    content=(
+                        f"Current topic: {thread_topic}\n"
+                        f"Thread summary: {thread_summary}"
+                    ),
+                )
+            )
+        else:
+            messages.append(ChatMessage(role="system", content=f"Current topic: {thread_topic}"))
 
         retrieved = self._build_retrieved_context_block(query)
         if retrieved:

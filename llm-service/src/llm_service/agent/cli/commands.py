@@ -32,7 +32,10 @@ class CommandHandler:
             "checkpoints": self.cmd_checkpoints,
             "resume": self.cmd_resume,
             "new-topic": self.cmd_new_topic,
+            "switch-topic": self.cmd_switch_topic,
             "focus": self.cmd_focus,
+            "threads": self.cmd_threads,
+            "topic-summary": self.cmd_topic_summary,
             "open": self.cmd_open,
             "search": self.cmd_search,
             "diff": self.cmd_diff,
@@ -94,7 +97,10 @@ class CommandHandler:
     /checkpoints                    List available checkpoints
     /resume <id|label> [update]     Resume from checkpoint and continue
     /new-topic <name>               Start a new isolated topic thread
+    /switch-topic <id|topic>        Switch current topic thread
+    /threads                        List topic threads
     /focus <current|all|id|topic>   Control retrieval scope
+    /topic-summary [--auto|text]    Show/set current topic summary
   /save <path>                    Save session to file
   /load <path>                    Load session from file
 
@@ -377,6 +383,24 @@ class CommandHandler:
         )
         return True
 
+    def cmd_switch_topic(self, args: str) -> bool:
+        """Switch current conversation topic thread."""
+        if not args.strip():
+            console.print("Usage: /switch-topic <id|topic>")
+            return True
+
+        target = args.strip()
+        if not self.agent.session.set_current_thread(target):
+            console.print(f"[red]Topic not found: {target}[/red]")
+            return True
+
+        thread = self.agent.session.get_current_thread() or {}
+        console.print(
+            f"[green]Switched topic[/green] "
+            f"({thread.get('topic', 'unknown')}, id={thread.get('id', 'n/a')})"
+        )
+        return True
+
     def cmd_focus(self, args: str) -> bool:
         """Set retrieval focus scope."""
         value = args.strip() if args else ""
@@ -403,6 +427,63 @@ class CommandHandler:
         # Keep current thread but set explicit focus value (thread id expected)
         self.agent.session.set_focus(value)
         console.print(f"[yellow]Set explicit focus to '{value}'[/yellow]")
+        return True
+
+    def cmd_threads(self, args: str) -> bool:
+        """List conversation threads and summaries."""
+        threads = self.agent.session.list_threads()
+        if not threads:
+            console.print("[yellow]No topic threads available[/yellow]")
+            return True
+
+        table = Table(title="Topic Threads")
+        table.add_column("Current", style="cyan")
+        table.add_column("Topic", style="green")
+        table.add_column("ID")
+        table.add_column("Updated")
+        table.add_column("Pinned")
+        table.add_column("Summary")
+
+        current_id = self.agent.session.current_thread_id
+        for thread in threads:
+            marker = "*" if thread.get("id") == current_id else ""
+            summary = (thread.get("summary") or "")[:80]
+            table.add_row(
+                marker,
+                str(thread.get("topic", "general")),
+                str(thread.get("id", "n/a")),
+                str(thread.get("updated_at", ""))[:19],
+                "yes" if thread.get("summary_pinned") else "no",
+                summary,
+            )
+
+        console.print(table)
+        return True
+
+    def cmd_topic_summary(self, args: str) -> bool:
+        """Show or set summary for the current topic thread."""
+        thread = self.agent.session.get_current_thread()
+        if not thread:
+            console.print("[yellow]No active topic thread[/yellow]")
+            return True
+
+        raw = args.strip()
+        if not raw:
+            summary = thread.get("summary") or "(empty)"
+            pinned = "yes" if thread.get("summary_pinned") else "no"
+            console.print(Panel(f"[bold]Pinned:[/bold] {pinned}\n{summary}", title="Current Topic Summary"))
+            return True
+
+        if raw == "--auto":
+            self.agent.session.set_thread_summary_pinned(False)
+            summary = self.agent.session.update_thread_summary(thread_id=thread["id"], force=True)
+            console.print("[green]Topic summary regenerated from recent messages[/green]")
+            if summary:
+                console.print(summary)
+            return True
+
+        self.agent.session.set_thread_summary(raw, pinned=True)
+        console.print("[green]Topic summary updated and pinned[/green]")
         return True
 
     def cmd_open(self, args: str) -> bool:

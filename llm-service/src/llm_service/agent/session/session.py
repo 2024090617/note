@@ -53,6 +53,12 @@ class Session:
         elif not self.current_thread_id:
             self.current_thread_id = self.threads[0]["id"]
 
+        for thread in self.threads:
+            thread.setdefault("summary", "")
+            thread.setdefault("summary_pinned", False)
+            thread.setdefault("created_at", self.created_at)
+            thread.setdefault("updated_at", self.updated_at)
+
     def add_message(self, role: str, content: str, thread_id: Optional[str] = None) -> Message:
         """Add a message to the conversation."""
         target_thread = thread_id or self.current_thread_id
@@ -60,6 +66,8 @@ class Session:
         self.messages.append(msg)
         if target_thread:
             self.touch_thread(target_thread)
+            # Keep a compact rolling summary to improve thread context selection.
+            self.update_thread_summary(target_thread)
         self.updated_at = datetime.now().isoformat()
         return msg
 
@@ -69,6 +77,7 @@ class Session:
             "id": f"th_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}",
             "topic": topic.strip() or "general",
             "summary": "",
+            "summary_pinned": False,
             "created_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat(),
         }
@@ -85,14 +94,85 @@ class Session:
                 thread["updated_at"] = datetime.now().isoformat()
                 return
 
+    def list_threads(self) -> List[Dict[str, Any]]:
+        """Return threads ordered by most recently updated."""
+        return sorted(self.threads, key=lambda t: t.get("updated_at", ""), reverse=True)
+
+    def update_thread_summary(self, thread_id: str, max_messages: int = 8, force: bool = False) -> str:
+        """Generate a compact summary for a thread from its recent messages."""
+        thread = self.get_thread(thread_id)
+        if thread is None:
+            return ""
+        if thread.get("summary_pinned") and not force:
+            return str(thread.get("summary") or "")
+
+        thread_messages = self.get_thread_messages(thread_id=thread_id, limit=max_messages)
+        if not thread_messages:
+            return ""
+
+        lines: List[str] = []
+        for msg in thread_messages:
+            role = msg.role.upper()
+            short = msg.content.replace("\n", " ").strip()
+            if len(short) > 120:
+                short = short[:120] + "..."
+            lines.append(f"{role}: {short}")
+
+        summary = " | ".join(lines)
+        if len(summary) > 700:
+            summary = summary[:700] + "..."
+
+        thread["summary"] = summary
+        thread["updated_at"] = datetime.now().isoformat()
+
+        return summary
+
+    def get_thread(self, identifier: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Resolve a thread by id, topic, or current when omitted."""
+        target = identifier or self.current_thread_id
+        if not target:
+            return None
+
+        for thread in self.threads:
+            if thread.get("id") == target:
+                return thread
+
+        for thread in reversed(self.threads):
+            if thread.get("topic") == target:
+                return thread
+
+        return None
+
+    def set_thread_summary(
+        self,
+        summary: str,
+        thread_id: Optional[str] = None,
+        pinned: bool = True,
+    ) -> bool:
+        """Set a manual summary for a thread and optionally pin it."""
+        thread = self.get_thread(thread_id)
+        if not thread:
+            return False
+
+        thread["summary"] = summary.strip()
+        thread["summary_pinned"] = bool(pinned)
+        thread["updated_at"] = datetime.now().isoformat()
+        self.updated_at = datetime.now().isoformat()
+        return True
+
+    def set_thread_summary_pinned(self, pinned: bool, thread_id: Optional[str] = None) -> bool:
+        """Pin or unpin a thread summary."""
+        thread = self.get_thread(thread_id)
+        if not thread:
+            return False
+        thread["summary_pinned"] = bool(pinned)
+        thread["updated_at"] = datetime.now().isoformat()
+        self.updated_at = datetime.now().isoformat()
+        return True
+
     def get_current_thread(self) -> Optional[Dict[str, Any]]:
         """Return the active conversation thread."""
-        if not self.current_thread_id:
-            return None
-        for thread in self.threads:
-            if thread["id"] == self.current_thread_id:
-                return thread
-        return None
+        return self.get_thread(self.current_thread_id)
 
     def set_current_thread(self, identifier: str) -> bool:
         """Switch current thread by id or topic name."""
