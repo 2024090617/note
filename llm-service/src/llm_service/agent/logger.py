@@ -135,14 +135,14 @@ class AgentLogger:
         Initialize the logger.
         
         Args:
-            log_dir: Directory for log files (default: ./agent_logs)
+            log_dir: Directory for log files (default: .digimate/log)
             console_level: Minimum level for console output
             file_level: Minimum level for file output
             log_to_console: Enable console logging
             log_to_file: Enable file logging
             max_preview_length: Max length for content previews
         """
-        self.log_dir = Path(log_dir) if log_dir else Path.cwd() / "agent_logs"
+        self.log_dir = Path(log_dir) if log_dir else Path.cwd() / ".digimate" / "log"
         self.console_level = console_level
         self.file_level = file_level
         self.log_to_console = log_to_console

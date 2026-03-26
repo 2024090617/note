@@ -52,6 +52,24 @@ class ConfluenceConfig:
     expand_macros: bool = True
     include_attachments: bool = True
     
+    # Cache directory for large page downloads (default: <cwd>/.digimate/cache/confluence)
+    cache_dir: str = field(
+        default_factory=lambda: os.getenv(
+            "CONFLUENCE_CACHE_DIR", ""
+        )
+    )
+    
+    @property
+    def resolved_cache_dir(self) -> str:
+        """Return resolved cache directory, creating it if needed."""
+        import pathlib
+        if self.cache_dir:
+            p = pathlib.Path(self.cache_dir)
+        else:
+            p = pathlib.Path.cwd() / ".digimate" / "cache" / "confluence"
+        p.mkdir(parents=True, exist_ok=True)
+        return str(p)
+    
     @property
     def api_base(self) -> str:
         """Get the API base URL based on deployment type"""

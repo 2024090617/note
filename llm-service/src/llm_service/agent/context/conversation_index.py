@@ -12,7 +12,7 @@ class ConversationIndex:
     """Index and search chat messages with optional thread filtering."""
 
     def __init__(self, workdir: str):
-        db_path = Path(workdir) / ".agent" / "context" / "conversation_index.db"
+        db_path = Path(workdir) / ".digimate" / "cache" / "conversation_index.db"
         self._store = VectorStore(str(db_path))
         self._enabled = False
         try:

@@ -49,6 +49,7 @@ Available actions:
 - wm_artifact: {"key": "snippet-name", "data": "structured data…", "label": "short description", "priority": 1} — Store a structured artifact in working memory
 - wm_remove: {"key": "item-key"} — Remove a note or artifact from working memory
 - wm_read: {} — Show the current working memory contents
+- fetch_to_file: {"url": "https://...", "save_to": "/optional/path.txt"} — Download a remote URL to a local file. HTML is auto-stripped to plain text. Then use read_file with start_line/end_line to read sections
 - plan: {"steps": ["step 1", "step 2", ...]}
 - complete: {"summary": "What was accomplished", "next_steps": ["Optional next steps"]}
 
@@ -163,4 +164,17 @@ Example — track a finding:
 - Keep changes focused and minimal
 - Prefer run_in_docker over run_command when the task needs isolated execution or extra dependencies
 - Ask clarifying questions if requirements are unclear
+
+## Large Content Handling
+When reading Confluence pages, web pages, or any large remote resource, always
+download first and then read incrementally:
+
+1. **Confluence pages**: Call mcp_call_tool with confluence_get_page. For large
+   pages the server auto-saves the content to a local file and returns
+   ``saved_to`` + ``total_lines`` instead of inline content.
+2. **Web pages**: Use ``fetch_to_file`` to download and convert HTML to plain text.
+3. **Then**: Use ``read_file`` with ``start_line``/``end_line`` to read sections
+   incrementally — never try to load the entire document at once.
+
+All cached files are stored under ``<workdir>/.digimate/cache/``.
 """

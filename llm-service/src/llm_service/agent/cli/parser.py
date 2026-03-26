@@ -122,7 +122,7 @@ def create_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--memory-dir",
-        help="Directory for memory storage (default: <workdir>/.agent/memory)",
+        help="Directory for memory storage (default: <workdir>/.digimate/memory)",
     )
 
     parser.add_argument(

@@ -8,7 +8,11 @@ Supports both Confluence Cloud and Server/Data Center.
 import asyncio
 import json
 import logging
+from pathlib import Path
 from typing import Any
+
+# Pages larger than this (chars) are auto-saved to local file when no save_to is given
+AUTO_SAVE_THRESHOLD = 8_000
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -110,7 +114,7 @@ class ConfluenceMCPServer:
     # =========================================================================
     
     async def _get_page(self, args: dict) -> dict:
-        """Get a Confluence page"""
+        """Get a Confluence page, optionally saving large content to a local file."""
         if not self.client:
             raise RuntimeError("Client not initialized")
         
@@ -118,6 +122,7 @@ class ConfluenceMCPServer:
         title = args.get("title")
         space_key = args.get("space_key")
         format_type = args.get("format", "json")
+        save_to = args.get("save_to")
         
         page = await self.client.get_page(
             page_id=page_id,
@@ -128,37 +133,53 @@ class ConfluenceMCPServer:
         # Parse content
         parsed = self.parser.parse(page.body_storage)
         
+        # Serialize content to string based on format
         if format_type == "markdown":
-            return {
-                "id": page.id,
-                "title": page.title,
-                "url": page.url,
-                "space": page.space_key,
-                "version": page.version,
-                "content": self.parser.extract_markdown(),
-                "format": "markdown",
-            }
+            content_str = self.parser.extract_markdown()
         elif format_type == "html":
-            return {
-                "id": page.id,
-                "title": page.title,
-                "url": page.url,
-                "space": page.space_key,
-                "version": page.version,
-                "content": page.body_view,
-                "format": "html",
-            }
+            content_str = page.body_view
         else:  # json
-            return {
-                "id": page.id,
-                "title": page.title,
-                "url": page.url,
-                "space": page.space_key,
-                "version": page.version,
-                "labels": page.labels,
-                "content": parsed,
-                "format": "json",
-            }
+            content_str = json.dumps(parsed, ensure_ascii=False, indent=2)
+        
+        # Build base metadata (always present in both inline and file-ref responses)
+        meta = {
+            "id": page.id,
+            "title": page.title,
+            "url": page.url,
+            "space": page.space_key,
+            "version": page.version,
+            "format": format_type,
+        }
+        if format_type == "json":
+            meta["labels"] = page.labels
+        
+        # Decide whether to save to local file
+        should_save = bool(save_to) or len(content_str) > AUTO_SAVE_THRESHOLD
+        
+        if should_save:
+            # Resolve file path
+            if save_to:
+                file_path = Path(save_to)
+            else:
+                ext = {"markdown": "md", "html": "html", "json": "json"}[format_type]
+                cache_dir = self.config.resolved_cache_dir
+                file_path = Path(cache_dir) / f"{page.id}.{ext}"
+            
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_text(content_str, encoding="utf-8")
+            total_lines = content_str.count("\n") + 1
+            
+            meta.update({
+                "saved_to": str(file_path),
+                "total_lines": total_lines,
+                "total_chars": len(content_str),
+                "note": "Content saved to local file. Use read_file with start_line/end_line to read sections.",
+            })
+            return meta
+        
+        # Small content — return inline (backward compatible)
+        meta["content"] = parsed if format_type == "json" else content_str
+        return meta
     
     async def _create_page(self, args: dict) -> dict:
         """Create a new page"""

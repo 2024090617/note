@@ -750,6 +750,10 @@ class Agent:
                 p.get("image", ""),
             ),
             "docker_available": lambda p: self.tools.docker_available(),
+            "fetch_to_file": lambda p: self.tools.fetch_to_file(
+                p.get("url", ""),
+                p.get("save_to"),
+            ),
             "mcp_list_servers": lambda p: self.tools.mcp_list_servers(),
             "mcp_list_tools": lambda p: self.tools.mcp_list_tools(
                 p.get("server"),

@@ -13,7 +13,7 @@ def get_confluence_tools() -> list[Tool]:
     return [
         Tool(
             name="confluence_get_page",
-            description="Read a Confluence page by ID or title. Returns parsed content with support for multi-tabs and tables.",
+            description="Read a Confluence page by ID or title. Returns parsed content with support for multi-tabs and tables. For large pages, pass save_to to write content to a local file — the response returns a file reference instead of inline content. Use read_file with start_line/end_line to read sections.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -33,6 +33,10 @@ def get_confluence_tools() -> list[Tool]:
                         "type": "string",
                         "enum": ["json", "markdown", "html"],
                         "description": "Output format (default: json)"
+                    },
+                    "save_to": {
+                        "type": "string",
+                        "description": "Absolute local file path to save the page content. If omitted and the page exceeds 8000 chars, content is auto-saved to the cache directory."
                     }
                 },
                 "required": ["space_key"]  # Either page_id or (title + space_key)

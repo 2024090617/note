@@ -39,7 +39,7 @@ class AgentConfig:
 
     # Memory settings
     memory_strategy: str = "claude-code"  # "claude-code" | "openclaw" | "none"
-    memory_dir: Optional[str] = None  # Defaults to <workdir>/.agent/memory
+    memory_dir: Optional[str] = None  # Defaults to <workdir>/.digimate/memory
 
     # Delegation settings
     enable_delegation: bool = False

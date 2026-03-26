@@ -12,7 +12,7 @@ Usage::
 
     from llm_service.agent.memory import create_memory_manager
 
-    manager = create_memory_manager("claude-code", memory_dir=".agent/memory", workdir=".")
+    manager = create_memory_manager("claude-code", memory_dir=".digimate/memory", workdir=".")
     manager.initialize()
     print(manager.get_prompt_context())
 """
@@ -44,7 +44,7 @@ def create_memory_manager(
     Args:
         strategy: ``"claude-code"`` | ``"openclaw"`` | ``"none"``.
         memory_dir: Directory for persistent memory files.
-                    Defaults to ``<workdir>/.agent/memory``.
+                    Defaults to ``<workdir>/.digimate/memory``.
         workdir: Agent working directory (project root).
 
     Returns:
@@ -54,7 +54,7 @@ def create_memory_manager(
         return None
 
     if memory_dir is None:
-        memory_dir = str(Path(workdir).resolve() / ".agent" / "memory")
+        memory_dir = str(Path(workdir).resolve() / ".digimate" / "memory")
 
     if strategy == "claude-code":
         from .claude_code import ClaudeCodeMemory
