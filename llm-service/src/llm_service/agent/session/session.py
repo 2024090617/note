@@ -38,6 +38,10 @@ class Session:
     threads: List[Dict[str, Any]] = field(default_factory=list)
     current_thread_id: Optional[str] = None
     focus_thread_id: Optional[str] = None  # None = current thread only
+    focus_mode: str = "free-chat"  # strict-task | task-with-side-questions | free-chat
+    task_anchor: Dict[str, Any] = field(default_factory=dict)
+    short_memory: Dict[str, Any] = field(default_factory=dict)
+    side_lane: Dict[str, Any] = field(default_factory=dict)
     checkpoints: List[Dict[str, Any]] = field(default_factory=list)
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
@@ -199,6 +203,93 @@ class Session:
         else:
             self.focus_thread_id = value
         self.updated_at = datetime.now().isoformat()
+
+    def set_focus_mode(self, mode: str) -> None:
+        """Set attention mode used by the LLM-native orchestrator."""
+        allowed = {"strict-task", "task-with-side-questions", "free-chat"}
+        self.focus_mode = mode if mode in allowed else "free-chat"
+        self.updated_at = datetime.now().isoformat()
+
+    def set_task_anchor(
+        self,
+        objective: str,
+        milestone: str = "",
+        blockers: Optional[List[str]] = None,
+    ) -> None:
+        """Store compact task anchor metadata for focus and retrieval filtering."""
+        self.task_anchor = {
+            "objective": objective.strip(),
+            "milestone": milestone.strip(),
+            "blockers": list(blockers or []),
+            "updated_at": datetime.now().isoformat(),
+        }
+        self.updated_at = datetime.now().isoformat()
+
+    def set_short_memory(
+        self,
+        summary: str,
+        next_action: str = "",
+        blockers: Optional[List[str]] = None,
+    ) -> None:
+        """Store a compact rolling digest used as short-term memory."""
+        self.short_memory = {
+            "summary": summary.strip(),
+            "next_action": next_action.strip(),
+            "blockers": list(blockers or []),
+            "updated_at": datetime.now().isoformat(),
+        }
+        self.updated_at = datetime.now().isoformat()
+
+    def start_side_lane(self, prompt: str) -> None:
+        """Start an ephemeral side-question lane while a task remains active."""
+        now = datetime.now().isoformat()
+        self.side_lane = {
+            "active": True,
+            "turns": 1,
+            "started_at": now,
+            "updated_at": now,
+            "summary": prompt.strip()[:240],
+            "history": [prompt.strip()[:240]],
+        }
+        self.updated_at = now
+
+    def append_side_lane(self, content: str) -> None:
+        """Append a user turn to the side-question lane."""
+        if not self.side_lane.get("active"):
+            self.start_side_lane(content)
+            return
+
+        history = list(self.side_lane.get("history", []))
+        history.append(content.strip()[:240])
+        self.side_lane["history"] = history[-8:]
+        self.side_lane["turns"] = int(self.side_lane.get("turns", 0)) + 1
+        self.side_lane["updated_at"] = datetime.now().isoformat()
+        self.side_lane["summary"] = " | ".join(self.side_lane["history"][-3:])[:300]
+        self.updated_at = datetime.now().isoformat()
+
+    def clear_side_lane(self) -> None:
+        """Clear ephemeral side-question lane state."""
+        self.side_lane = {}
+        self.updated_at = datetime.now().isoformat()
+
+    def should_evict_side_lane(self, max_turns: int, ttl_minutes: int) -> bool:
+        """Check if side lane should be evicted by turn count or age."""
+        if not self.side_lane.get("active"):
+            return False
+
+        turns = int(self.side_lane.get("turns", 0))
+        if turns >= max_turns:
+            return True
+
+        updated_at = str(self.side_lane.get("updated_at", ""))
+        if not updated_at:
+            return False
+
+        try:
+            age = datetime.now() - datetime.fromisoformat(updated_at)
+        except Exception:
+            return False
+        return age.total_seconds() >= ttl_minutes * 60
 
     def get_thread_messages(
         self,
@@ -386,6 +477,10 @@ class Session:
             "threads": list(self.threads),
             "current_thread_id": self.current_thread_id,
             "focus_thread_id": self.focus_thread_id,
+            "focus_mode": self.focus_mode,
+            "task_anchor": dict(self.task_anchor),
+            "short_memory": dict(self.short_memory),
+            "side_lane": dict(self.side_lane),
             "checkpoints": list(self.checkpoints),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -406,6 +501,10 @@ class Session:
             threads=list(data.get("threads", [])),
             current_thread_id=data.get("current_thread_id"),
             focus_thread_id=data.get("focus_thread_id"),
+            focus_mode=data.get("focus_mode", "free-chat"),
+            task_anchor=dict(data.get("task_anchor", {})),
+            short_memory=dict(data.get("short_memory", {})),
+            side_lane=dict(data.get("side_lane", {})),
             checkpoints=list(data.get("checkpoints", [])),
             created_at=data.get("created_at", datetime.now().isoformat()),
             updated_at=data.get("updated_at", datetime.now().isoformat()),

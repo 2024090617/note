@@ -39,9 +39,16 @@ def main():
         max_collab_rounds=max(1, int(getattr(args, "max_collab_rounds", 1))),
         memory_strategy="none" if getattr(args, "no_memory", False) else getattr(args, "memory_strategy", "claude-code"),
         memory_dir=getattr(args, "memory_dir", None),
+        web_request_timeout=max(1, int(getattr(args, "web_timeout", 20))),
+        web_max_read_bytes=max(1_024, int(getattr(args, "web_max_read_bytes", 2 * 1024 * 1024))),
+        web_max_read_chars=max(500, int(getattr(args, "web_max_read_chars", 20_000))),
+        web_max_download_bytes=max(1_024, int(getattr(args, "web_max_download_bytes", 50 * 1024 * 1024))),
+        web_block_private_hosts=not bool(getattr(args, "allow_private_hosts", False)),
     )
 
     # Create agent
+    print(args.model)
+    print(config.model)
     agent = Agent(config)
 
     # Show log dir on startup if verbose

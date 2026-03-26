@@ -18,7 +18,33 @@ from ..context import TopicDetector, ConversationIndex
 from .config import AgentConfig, AgentMode, AgentResponse
 from .delegation import DelegationEngine
 from .roles import RoleRegistry
-from .prompt import DEVELOPER_AGENT_SYSTEM_PROMPT
+from .prompt import (
+    DEVELOPER_AGENT_SYSTEM_PROMPT,
+    CHAT_ASSISTANT_SYSTEM_PROMPT,
+)
+from .artifact_store import ArtifactStore
+from .chunked_output_adapter import ChunkedOutputAdapter
+from .retrieval_reranker import RetrievalReranker
+from .chat_planner import ChatToolPlanner
+
+
+_INTENT_ROUTER_SYSTEM_PROMPT = """Classify user intent for an autonomous coding agent.
+
+Return strict JSON only, no markdown:
+{
+    "mode": "task" | "chat" | "side-question",
+    "confidence": 0.0-1.0,
+    "goal": "normalized goal text for task mode",
+    "continuation": true | false,
+    "continuation_note": "optional update details"
+}
+
+Rules:
+- mode=task when the user asks for implementation, debugging, refactor, testing, or execution.
+- mode=chat for Q&A/explanation/discussion requests that do not require autonomous tool execution.
+- mode=side-question for short off-topic questions while an active task exists.
+- continuation=true when user asks to continue/resume the active task.
+"""
 
 
 class Agent:
@@ -48,6 +74,11 @@ class Agent:
             system_prompt=self.config.system_prompt or DEVELOPER_AGENT_SYSTEM_PROMPT,
         )
         self.tools = ToolRegistry(workdir=self.config.workdir)
+        self.tools.web_request_timeout = self.config.web_request_timeout
+        self.tools.web_max_read_bytes = self.config.web_max_read_bytes
+        self.tools.web_max_read_chars = self.config.web_max_read_chars
+        self.tools.web_max_download_bytes = self.config.web_max_download_bytes
+        self.tools.web_block_private_hosts = self.config.web_block_private_hosts
         self._client: Optional[CopilotBridgeClient] = None
         self._callbacks: Dict[str, Callable] = {}
 
@@ -103,6 +134,36 @@ class Agent:
         # Topic isolation + retrieval index
         self.topic_detector = TopicDetector(threshold=self.config.topic_shift_threshold)
         self.conversation_index = ConversationIndex(workdir=self.config.workdir)
+        self.session.set_focus_mode(self.config.focus_mode_default)
+
+        # Initialize artifact store and chunked output adapter (Phase 2: large-content pipeline)
+        self.artifact_store = ArtifactStore(max_artifacts=self.config.max_artifacts)
+        self.chunked_output_adapter: Optional[ChunkedOutputAdapter] = None
+        if self.config.enable_chunking:
+            self.chunked_output_adapter = ChunkedOutputAdapter(
+                artifact_store=self.artifact_store,
+                chunking_threshold_chars=self.config.chunking_threshold_chars,
+                min_chunk_chars=self.config.chunk_min_chars,
+                max_chunk_chars=self.config.chunk_max_chars,
+                chunking_strategy=self.config.chunking_strategy,
+            )
+
+        # Phase 3 retrieval reranking and promotion guard
+        self.retrieval_reranker = RetrievalReranker(
+            relevance_weight=self.config.retrieval_weight_relevance,
+            recency_weight=self.config.retrieval_weight_recency,
+            task_alignment_weight=self.config.retrieval_weight_task_alignment,
+        )
+        self.chat_planner = ChatToolPlanner(
+            client_getter=lambda: self.client,
+            model_getter=lambda: self.config.model,
+            tools=self.tools,
+            logger=self.logger,
+            json_extractor=self._extract_json_object,
+            allowed_tools=self.config.chat_planner_allowed_tools,
+            max_tool_calls_per_turn=self.config.chat_planner_max_tool_calls_per_turn,
+        )
+        self._last_promoted_goal = ""
 
     @property
     def client(self) -> CopilotBridgeClient:
@@ -171,6 +232,315 @@ class Agent:
         self.config.system_prompt = prompt
         self.session.system_prompt = prompt
 
+    def respond(self, user_input: str, force_task: bool = False) -> Dict[str, Any]:
+        """LLM-native turn orchestration without slash command dependency."""
+        decision = self._decide_interaction(user_input, force_task=force_task)
+        self._emit("intent_decision", decision)
+
+        mode = decision.get("mode", "chat")
+        if mode == "task":
+            preserve_state = bool(decision.get("continuation"))
+            task_text = (decision.get("goal") or user_input).strip()
+            if not task_text:
+                task_text = user_input
+
+            self.session.clear_side_lane()
+            self.session.set_focus_mode("strict-task")
+            self.session.set_task_anchor(objective=task_text)
+
+            result = self.run_task(
+                task=task_text,
+                preserve_state=preserve_state,
+                continuation_note=decision.get("continuation_note") or None,
+            )
+            return {
+                "mode": "task",
+                "decision": decision,
+                "summary": result.summary,
+                "error": result.error,
+                "result": result,
+            }
+
+        if mode == "side-question" and self.session.state.goal:
+            self.session.set_focus_mode("task-with-side-questions")
+            if self.session.side_lane.get("active"):
+                self.session.append_side_lane(user_input)
+            else:
+                self.session.start_side_lane(user_input)
+            reply = self.chat(user_input)
+            eviction_note = self._evict_side_lane_if_needed()
+            recap = (
+                f"\n\nActive task remains: {self.session.state.goal}. "
+                "Say 'continue' when you want me to resume autonomous execution."
+            )
+            return {
+                "mode": "chat",
+                "decision": decision,
+                "summary": reply + recap + eviction_note,
+                "error": None,
+                "result": None,
+            }
+
+        if mode == "chat" and self.session.state.goal and self.session.focus_mode == "task-with-side-questions":
+            self.session.append_side_lane(user_input)
+            reply = self.chat(user_input)
+            eviction_note = self._evict_side_lane_if_needed()
+            recap = (
+                f"\n\nActive task remains: {self.session.state.goal}. "
+                "Say 'continue' when you want me to resume autonomous execution."
+            )
+            return {
+                "mode": "chat",
+                "decision": decision,
+                "summary": reply + recap + eviction_note,
+                "error": None,
+                "result": None,
+            }
+
+        self.session.set_focus_mode("free-chat")
+        reply = self.chat(user_input)
+        return {
+            "mode": "chat",
+            "decision": decision,
+            "summary": reply,
+            "error": None,
+            "result": None,
+        }
+
+    def _decide_interaction(self, user_input: str, force_task: bool = False) -> Dict[str, Any]:
+        """Choose between chat/task execution for a user turn."""
+        if force_task:
+            return {
+                "mode": "task",
+                "confidence": 1.0,
+                "goal": user_input,
+                "continuation": False,
+                "continuation_note": "",
+                "source": "forced",
+            }
+
+        llm_decision = self._decide_interaction_with_llm(user_input)
+        if llm_decision is not None and float(llm_decision.get("confidence", 0.0)) >= self.config.intent_confidence_threshold:
+            llm_decision["source"] = "llm"
+            return llm_decision
+
+        # If LLM routing fails or confidence is too low, default to chat
+        return {
+            "mode": "chat",
+            "confidence": 0.5,
+            "goal": user_input,
+            "continuation": False,
+            "continuation_note": "",
+            "source": "default",
+        }
+
+    def _decide_interaction_with_llm(self, user_input: str) -> Optional[Dict[str, Any]]:
+        """Use a lightweight LLM classifier to route the turn."""
+        active_goal = self.session.state.goal or ""
+        payload = {
+            "active_goal": active_goal,
+            "focus_mode": self.session.focus_mode,
+            "user_input": user_input,
+        }
+        messages = [
+            ChatMessage(role="system", content=_INTENT_ROUTER_SYSTEM_PROMPT),
+            ChatMessage(role="user", content=json.dumps(payload, ensure_ascii=False)),
+        ]
+
+        try:
+            response = self.client.chat(messages, model=self.config.model)
+            data = self._extract_json_object(response.content)
+            if not data:
+                return None
+            mode = str(data.get("mode", "chat"))
+            if mode not in {"task", "chat", "side-question"}:
+                mode = "chat"
+            return {
+                "mode": mode,
+                "confidence": float(data.get("confidence", 0.0) or 0.0),
+                "goal": str(data.get("goal", user_input)),
+                "continuation": bool(data.get("continuation", False)),
+                "continuation_note": str(data.get("continuation_note", "")),
+            }
+        except Exception:
+            return None
+
+    def _evict_side_lane_if_needed(self) -> str:
+        """Evict off-topic side lane when limits are reached and return task reminder text."""
+        if not self.session.state.goal:
+            self.session.clear_side_lane()
+            return ""
+
+        if not self.session.should_evict_side_lane(
+            max_turns=self.config.side_lane_max_turns,
+            ttl_minutes=self.config.side_lane_ttl_minutes,
+        ):
+            return ""
+
+        self.session.clear_side_lane()
+        self.session.set_focus_mode("strict-task")
+        self.session.set_task_anchor(
+            objective=self.session.state.goal,
+            milestone="Resuming after side-question lane eviction",
+        )
+        return (
+            "\n\nSide-question lane closed to keep focus. "
+            f"Resuming task context: {self.session.state.goal}."
+        )
+
+    def _extract_json_object(self, text: str) -> Optional[Dict[str, Any]]:
+        """Extract first valid JSON object from an LLM response."""
+        raw = text.strip()
+        if raw.startswith("```"):
+            fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", raw, re.DOTALL)
+            if fenced:
+                raw = fenced.group(1).strip()
+
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else None
+        except Exception:
+            pass
+
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                parsed = json.loads(raw[start : end + 1])
+                return parsed if isinstance(parsed, dict) else None
+            except Exception:
+                return None
+        return None
+
+    def _normalize_observation(self, action: str, content: str) -> str:
+        """Keep tool observations within prompt-safe limits for large outputs."""
+        text = str(content or "")
+        max_chars = self.config.max_tool_output_chars
+        if len(text) <= max_chars:
+            return text
+
+        head_chars = min(self.config.large_output_head_chars, max_chars - 200)
+        tail_chars = min(self.config.large_output_tail_chars, max_chars - head_chars - 200)
+        omitted = len(text) - (head_chars + tail_chars)
+
+        truncated = (
+            f"{text[:head_chars]}\n"
+            f"\n...[truncated {omitted} chars from {action} output; request narrower reads/chunks if needed]...\n\n"
+            f"{text[-tail_chars:]}"
+        )
+        return truncated
+
+    def _infer_source_type(self, action: str) -> str:
+        """Infer source type from action name."""
+        action_lower = action.lower()
+        if "file" in action_lower or "read" in action_lower:
+            return "file_read"
+        elif "mcp" in action_lower:
+            return "mcp_tool"
+        elif "command" in action_lower or "run" in action_lower:
+            return "command_output"
+        else:
+            return "tool_output"
+
+    def _extract_source_metadata(self, action: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract source-specific metadata from action parameters."""
+        metadata = {}
+        action_lower = action.lower()
+
+        if "file" in action_lower or "read" in action_lower:
+            # File read source
+            if "path" in params:
+                metadata["path"] = params["path"]
+        elif "mcp" in action_lower:
+            # MCP tool call source
+            if "server" in params:
+                metadata["server"] = params["server"]
+            if "tool" in params:
+                metadata["tool"] = params["tool"]
+        elif "command" in action_lower or "run" in action_lower:
+            # Command execution source
+            if "command" in params:
+                metadata["command"] = params["command"]
+
+        return metadata
+
+    def _refresh_short_memory(self, milestone: str = "") -> None:
+        """Update rolling short-term memory digest for the active task."""
+        goal = self.session.state.goal or ""
+        if not goal:
+            return
+
+        plan = self.session.state.plan or []
+        plan_step = self.session.state.plan_step
+        next_action = ""
+        if plan and 0 <= plan_step < len(plan):
+            next_action = plan[plan_step]
+
+        wm_summary = self.working_memory.summary()
+        summary_parts = [f"Goal: {goal}"]
+        if milestone:
+            summary_parts.append(f"Milestone: {milestone}")
+        if wm_summary:
+            summary_parts.append(f"WorkingMemory: {wm_summary}")
+
+        self.session.set_short_memory(
+            summary=" | ".join(summary_parts),
+            next_action=next_action,
+            blockers=list(self.session.task_anchor.get("blockers", [])),
+        )
+        self._promote_short_memory_if_needed(milestone)
+
+    def _build_task_context_text(self) -> str:
+        """Build compact task context used for retrieval alignment scoring."""
+        anchor = self.session.task_anchor or {}
+        short = self.session.short_memory or {}
+        parts = [
+            str(anchor.get("objective", "")),
+            str(anchor.get("milestone", "")),
+            " ".join(anchor.get("blockers", [])),
+            str(short.get("summary", "")),
+            str(short.get("next_action", "")),
+        ]
+        return " ".join(p for p in parts if p).strip()
+
+    def _build_message_recency_index(self, thread_scope: Optional[str]) -> Dict[str, float]:
+        """Map message ids to normalized recency in [0, 1]."""
+        messages = self.session.get_thread_messages(thread_id=thread_scope) if thread_scope else self.session.messages
+        if not messages:
+            return {}
+        if len(messages) == 1:
+            return {messages[0].id: 1.0}
+
+        recency: Dict[str, float] = {}
+        total = len(messages)
+        for idx, msg in enumerate(messages):
+            recency[msg.id] = idx / float(total - 1)
+        return recency
+
+    def _promote_short_memory_if_needed(self, milestone: str) -> None:
+        """Promote stable short-memory summaries into long-term memory at completion."""
+        if not self.config.enable_short_memory_promotion:
+            return
+        if not self.memory_manager:
+            return
+        if "completed" not in milestone.lower():
+            return
+
+        goal = str(self.session.state.goal or "").strip()
+        summary = str(self.session.short_memory.get("summary", "")).strip()
+        if not goal or not summary:
+            return
+        if goal == self._last_promoted_goal:
+            return
+
+        topic = "long-term" if self.memory_manager.name == "openclaw" else "task-outcomes"
+        promoted = f"Completed task: {goal}. {summary[:320]}"
+        try:
+            self.memory_manager.store(promoted, topic=topic)
+            self._last_promoted_goal = goal
+        except Exception:
+            pass
+
     def chat(self, user_input: str) -> str:
         """
         Send a message and get a response (simple chat mode).
@@ -198,7 +568,24 @@ class Agent:
                 content=user_msg.content,
             )
 
+        planner_decision = self.chat_planner.plan(
+            user_input=user_input,
+            focus_mode=self.session.focus_mode,
+            active_goal=self.session.state.goal or "",
+        )
+        tool_note = ""
+        if planner_decision.get("use_tool"):
+            tool_result = self.chat_planner.execute(planner_decision)
+            if tool_result is not None:
+                tool_note = self.chat_planner.render_tool_note(
+                    planner_decision=planner_decision,
+                    tool_result=tool_result,
+                    max_chars=self.config.max_tool_output_chars,
+                )
+
         messages = self._build_curated_chat_messages(query=user_input)
+        if tool_note:
+            messages.append(ChatMessage(role="system", content=tool_note))
 
         try:
             response = self.client.chat(messages, model=self.config.model)
@@ -230,10 +617,21 @@ class Agent:
         else:
             thread_scope = scope
 
+        candidate_limit = max(
+            self.config.context_retrieval_limit,
+            self.config.context_retrieval_limit * self.config.retrieval_candidate_multiplier,
+        )
         snippets = self.conversation_index.search(
             query=query,
-            limit=self.config.context_retrieval_limit,
+            limit=candidate_limit,
             thread_id=thread_scope,
+        )
+        snippets = self.retrieval_reranker.rerank_snippets(
+            snippets=snippets,
+            query=query,
+            task_context=self._build_task_context_text(),
+            message_recency_index=self._build_message_recency_index(thread_scope),
+            limit=self.config.context_retrieval_limit,
         )
 
         lines: List[str] = []
@@ -243,14 +641,24 @@ class Agent:
             for item in snippets:
                 doc_id = str(item.get("doc_id", ""))
                 content = str(item.get("content", "")).replace("\n", " ").strip()
-                lines.append(f"  <snippet source=\"{doc_id}\">{content[:280]}</snippet>")
+                score = float(item.get("rerank", {}).get("final", 0.0))
+                lines.append(f"  <snippet source=\"{doc_id}\" score=\"{score:.2f}\">{content[:280]}</snippet>")
             lines.append("</retrieved_conversation>")
 
         if self.memory_manager:
             try:
-                memories = self.memory_manager.recall(query, limit=3)
+                memory_candidates = self.memory_manager.recall(
+                    query,
+                    limit=max(3, 3 * self.config.retrieval_candidate_multiplier),
+                )
             except Exception:
-                memories = []
+                memory_candidates = []
+            memories = self.retrieval_reranker.rerank_memories(
+                memories=memory_candidates,
+                query=query,
+                task_context=self._build_task_context_text(),
+                limit=3,
+            )
             if memories:
                 lines.append("<retrieved_memory>")
                 for mem in memories:
@@ -264,10 +672,13 @@ class Agent:
 
     def _build_curated_chat_messages(self, query: str) -> List[ChatMessage]:
         """Build thread-scoped chat messages with optional retrieval context."""
+        chat_system_prompt = self.session.system_prompt
+        if not chat_system_prompt or chat_system_prompt == DEVELOPER_AGENT_SYSTEM_PROMPT:
+            chat_system_prompt = CHAT_ASSISTANT_SYSTEM_PROMPT
         messages = [
             ChatMessage(
                 role="system",
-                content=self.session.system_prompt or DEVELOPER_AGENT_SYSTEM_PROMPT,
+                content=chat_system_prompt,
             ),
         ]
 
@@ -329,6 +740,10 @@ class Agent:
             effective_goal = self.session.state.goal
         else:
             self.session.set_goal(task)
+            self.session.set_task_anchor(objective=task)
+
+        self.session.set_focus_mode("strict-task")
+        self._refresh_short_memory(milestone="Task initialized")
 
         # Reset task-scoped scratch-pad only for new tasks.
         if preserve_state:
@@ -418,6 +833,7 @@ class Agent:
                         observation=None,
                         is_complete=True,
                     )
+                    self._refresh_short_memory(milestone="Task completed")
                     self.logger.end_interaction(status="completed", result=response.summary)
                     return response
 
@@ -427,8 +843,20 @@ class Agent:
                     result = self._execute_action(response.action, response.action_input or {})
                     action_duration = (time.time() - action_start) * 1000
 
-                    response.action_result = result.output if result.success else f"Error: {result.error}"
-                    observation = response.action_result
+                    # Process through chunked output adapter if enabled (Phase 2)
+                    if self.chunked_output_adapter:
+                        chunked_output = self.chunked_output_adapter.process_tool_result(
+                            result,
+                            source_type=self._infer_source_type(response.action),
+                            source_metadata=self._extract_source_metadata(response.action, response.action_input or {}),
+                        )
+                        response.action_result = chunked_output.summary
+                        observation = chunked_output.summary
+                    else:
+                        # Fallback to legacy truncation if chunking disabled
+                        raw_result = result.output if result.success else f"Error: {result.error}"
+                        response.action_result = self._normalize_observation(response.action, raw_result)
+                        observation = response.action_result
 
                     # Log tool call
                     self.logger.log_tool_call(
@@ -478,6 +906,9 @@ class Agent:
                     observation=observation,
                     is_complete=False,
                 )
+
+                if (iteration + 1) % self.config.short_memory_update_interval == 0:
+                    self._refresh_short_memory(milestone=f"Iteration {iteration + 1}")
 
             # Max iterations reached
             self.create_checkpoint("task_incomplete", metadata={"error": "max_iterations_exceeded"})
@@ -578,6 +1009,18 @@ class Agent:
                     prefix_blocks.append(mem_ctx)
             except Exception:
                 pass  # Fail silently — memory may not be readable
+
+        # Inject rolling short memory digest
+        short_summary = str(self.session.short_memory.get("summary", "")).strip()
+        if short_summary:
+            short_block = (
+                "<short_memory>\n"
+                f"  <summary>{short_summary}</summary>\n"
+                f"  <next_action>{self.session.short_memory.get('next_action', '')}</next_action>\n"
+                "</short_memory>"
+            )
+            self.budget.record("short_memory", short_block)
+            prefix_blocks.append(short_block)
 
         # Inject working memory (task-scoped scratch-pad)
         wm_budget = self.budget.remaining("working_memory")
@@ -758,6 +1201,13 @@ class Agent:
                 p.get("server", ""),
                 p.get("tool", ""),
                 p.get("arguments"),
+            ),
+            "read_online_content": lambda p: self.tools.read_online_content(
+                p.get("url", ""),
+            ),
+            "download_remote_resource": lambda p: self.tools.download_remote_resource(
+                p.get("url", ""),
+                p.get("path"),
             ),
             "delegate_review": lambda p: self._handle_delegate_review(
                 p.get("task", self.session.goal or ""),
@@ -1010,6 +1460,8 @@ class Agent:
             "mcp_list_servers": ActionType.SEARCH,
             "mcp_list_tools": ActionType.SEARCH,
             "mcp_call_tool": ActionType.LLM_CALL,
+            "read_online_content": ActionType.SEARCH,
+            "download_remote_resource": ActionType.FILE_WRITE,
             "delegate_review": ActionType.LLM_CALL,
             "memory_store": ActionType.FILE_WRITE,
             "memory_recall": ActionType.SEARCH,
@@ -1044,6 +1496,19 @@ class Agent:
                 "files": len(self.memory_manager.list_memories()),
             }
 
+        interaction_info = None
+        current_interaction = self.logger.get_interaction_log()
+        if current_interaction:
+            interaction_info = current_interaction.summary()
+
+        chunking_info = {
+            "enabled": bool(self.chunked_output_adapter),
+            "threshold_chars": self.config.chunking_threshold_chars,
+            "min_chunk_chars": self.config.chunk_min_chars,
+            "max_chunk_chars": self.config.chunk_max_chars,
+            "strategy": self.config.chunking_strategy,
+        }
+
         return {
             "mode": self.config.mode.value,
             "model": self.config.model,
@@ -1062,6 +1527,13 @@ class Agent:
             "threads": len(self.session.threads),
             "current_topic": (self.session.get_current_thread() or {}).get("topic"),
             "focus": self.session.focus_thread_id or "current",
+            "focus_mode": self.session.focus_mode,
+            "task_anchor": self.session.task_anchor,
+            "short_memory": self.session.short_memory,
+            "side_lane": self.session.side_lane,
+            "chunking": chunking_info,
+            "artifact_store": self.artifact_store.stats(),
+            "interaction": interaction_info,
         }
 
     def save_session(self, path: str):

@@ -221,6 +221,22 @@ Check the `examples/` directory:
 
 The Developer Agent is an autonomous coding assistant that can read requirements, create/modify files, run tests, and fix issues using a ReAct (Reason + Act) loop.
 
+### Project Structure (Agent)
+
+All agent code lives under `src/llm_service/agent/`:
+
+- `cli/` — CLI entry point, argument parsing, output helpers, and interactive/non-interactive runners.
+- `core/` — The agent brain: `Agent` orchestration, `AgentConfig`, prompt/role definitions, delegation, artifact storage, retrieval/reranking, and chunked output handling.
+- `tools/` — Tool implementations the agent can invoke (file/search/environment/web/MCP/sandbox/command operations) plus the `ToolRegistry` that wires them.
+- `skills/` — Skill discovery and management so the agent can load task-specific skills from the workspace.
+- `session/` — Conversation state, action log, context budgeting, and working memory used to track a task over time.
+- `memory/` — Pluggable long-term memory strategies (vector stores, OpenCLAW, Claude Code memory) with a shared base interface.
+- `context/` — Topic detection and conversation indexing to keep threads focused and enable retrieval-aware responses.
+- `mcp/` — Model Context Protocol integration for connecting external MCP servers as tools.
+- `copilot_client.py` — HTTP client for the Copilot Bridge backend; default LLM transport for the agent.
+- `logger.py` — Structured logging to console/files for agent runs.
+- `__main__.py` — Enables `python -m llm_service.agent` entrypoint (also exposed as the `agent` console script).
+
 ### Prerequisites: Copilot Bridge
 
 The agent uses VS Code's Copilot models via the Copilot Bridge:
