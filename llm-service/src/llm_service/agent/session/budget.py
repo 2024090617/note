@@ -24,10 +24,11 @@ DEFAULT_RESPONSE_RESERVE = 4_096  # tokens reserved for LLM output
 _DEFAULT_RATIOS: Dict[str, float] = {
     "system_prompt": 0.15,
     "memory": 0.10,
+    "short_memory": 0.05,
     "working_memory": 0.05,
     "skills": 0.05,
     "mcp_tools": 0.05,
-    "history": 0.60,  # bulk of the budget
+    "history": 0.55,  # bulk of the budget
 }
 
 

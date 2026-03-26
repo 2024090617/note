@@ -7,6 +7,7 @@ from .command_ops import CommandOpsMixin
 from .environment_ops import EnvironmentOpsMixin
 from .sandbox_ops import SandboxOpsMixin
 from .mcp_ops import MCPOpsMixin
+from .web_ops import WebOpsMixin
 
 
 class ToolRegistry(
@@ -17,6 +18,7 @@ class ToolRegistry(
     EnvironmentOpsMixin,
     SandboxOpsMixin,
     MCPOpsMixin,
+    WebOpsMixin,
 ):
     """
     Registry of tools available to the agent.

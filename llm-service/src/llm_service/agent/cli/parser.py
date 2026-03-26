@@ -21,8 +21,8 @@ def create_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--model",
-        default="gpt-4o-mini",
-        help="Model to use (default: gpt-4o-mini)",
+        default="claude-haiku-4.5",
+        help="Model to use (default: claude-haiku-4.5)",
     )
 
     parser.add_argument(
@@ -123,6 +123,40 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--memory-dir",
         help="Directory for memory storage (default: <workdir>/.agent/memory)",
+    )
+
+    parser.add_argument(
+        "--web-timeout",
+        type=int,
+        default=20,
+        help="HTTP timeout in seconds for online read/download tools (default: 20)",
+    )
+
+    parser.add_argument(
+        "--web-max-read-bytes",
+        type=int,
+        default=2 * 1024 * 1024,
+        help="Max response bytes fetched for read_online_content (default: 2097152)",
+    )
+
+    parser.add_argument(
+        "--web-max-read-chars",
+        type=int,
+        default=20000,
+        help="Max text chars returned by read_online_content (default: 20000)",
+    )
+
+    parser.add_argument(
+        "--web-max-download-bytes",
+        type=int,
+        default=50 * 1024 * 1024,
+        help="Max bytes allowed for download_remote_resource (default: 52428800)",
+    )
+
+    parser.add_argument(
+        "--allow-private-hosts",
+        action="store_true",
+        help="Allow localhost/private network targets for web tools (unsafe)",
     )
 
     parser.add_argument(
