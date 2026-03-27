@@ -20,6 +20,9 @@ from .delegation import DelegationEngine
 from .roles import RoleRegistry
 from .prompt import DEVELOPER_AGENT_SYSTEM_PROMPT
 
+# Actions that may mutate workspace source files — blocked in read-only (chat) mode
+_BLOCKED_IN_CHAT: frozenset = frozenset({"write_file", "create_file", "run_command", "run_in_docker"})
+
 
 class Agent:
     """
@@ -50,6 +53,7 @@ class Agent:
         self.tools = ToolRegistry(workdir=self.config.workdir)
         self._client: Optional[CopilotBridgeClient] = None
         self._callbacks: Dict[str, Callable] = {}
+        self._read_only: bool = False  # set to True by run_task(read_only=True) / chat()
 
         # Initialize logger
         self.logger = AgentLogger(
@@ -173,7 +177,14 @@ class Agent:
 
     def chat(self, user_input: str) -> str:
         """
-        Send a message and get a response (simple chat mode).
+        Send a message in read-only chat mode.
+
+        Delegates to run_task(read_only=True, preserve_working_memory=True) so that:
+        - File-mutating actions (write_file, create_file, run_command, run_in_docker)
+          are blocked; the LLM tells the user to use /task instead.
+        - All memory layers (session history, working memory, conversation index,
+          persistent memory) are shared and accumulate across turns — findings from
+          one chat turn are visible in the next, and in any subsequent /task call.
 
         Args:
             user_input: User message
@@ -181,44 +192,30 @@ class Agent:
         Returns:
             Assistant response
         """
-        recent_context = "\n".join(
-            m.content
-            for m in self.session.get_thread_messages(limit=self.config.context_recent_messages)
-            if m.role == "user"
+        result = self.run_task(
+            user_input,
+            read_only=True,
+            preserve_working_memory=True,
         )
-        if self.topic_detector.is_topic_shift(recent_context, user_input):
-            self.session.create_thread(topic=self._topic_label_from_message(user_input), switch=True)
-
-        user_msg = self.session.add_message("user", user_input)
-        if user_msg.thread_id:
-            self.conversation_index.index_message(
-                message_id=user_msg.id,
-                thread_id=user_msg.thread_id,
-                role=user_msg.role,
-                content=user_msg.content,
-            )
-
-        messages = self._build_curated_chat_messages(query=user_input)
-
-        try:
-            response = self.client.chat(messages, model=self.config.model)
-            assistant_msg = self.session.add_message("assistant", response.content)
-            if assistant_msg.thread_id:
-                self.conversation_index.index_message(
-                    message_id=assistant_msg.id,
-                    thread_id=assistant_msg.thread_id,
-                    role=assistant_msg.role,
-                    content=assistant_msg.content,
-                )
-            return response.content
-        except CopilotBridgeError as e:
-            error_msg = f"Error: {e}"
-            return error_msg
+        return result.summary or ""
 
     def _topic_label_from_message(self, text: str) -> str:
         """Derive a short topic slug from user input."""
         words = re.findall(r"\w+", text.lower())
         return "-".join(words[:4]) if words else "general"
+
+    def _reindex_compact_summary(self) -> None:
+        """Index the compaction summary into ConversationIndex for retrieval."""
+        try:
+            msgs = self.session.get_thread_messages(limit=1)
+            if msgs and msgs[0].role == "system":
+                self.conversation_index.index_message(
+                    content=msgs[0].content,
+                    role="system",
+                    thread_id=self.session.current_thread_id,
+                )
+        except Exception:
+            pass  # best-effort — don't break the conversation
 
     def _build_retrieved_context_block(self, query: str) -> str:
         """Build retrieval block from indexed conversation and memory."""
@@ -248,7 +245,11 @@ class Agent:
 
         if self.memory_manager:
             try:
-                memories = self.memory_manager.recall(query, limit=3)
+                # Gap 7 fix: derive recall limit from budget instead of hardcoded 3
+                mem_remaining = self.budget.remaining("memory")
+                # ~250 tokens per memory entry → budget-proportional limit, min 2, max 15
+                recall_limit = max(2, min(15, mem_remaining // 250))
+                memories = self.memory_manager.recall(query, limit=recall_limit)
             except Exception:
                 memories = []
             if memories:
@@ -263,12 +264,21 @@ class Agent:
         return "\n".join(lines)
 
     def _build_curated_chat_messages(self, query: str) -> List[ChatMessage]:
-        """Build thread-scoped chat messages with optional retrieval context."""
+        """Build thread-scoped chat messages with budget tracking, working memory,
+        retrieval context, and auto-compaction.
+
+        This is the unified prompt builder for the chat() path — it now mirrors
+        the budget-awareness and working-memory injection of _build_system_prompt()
+        while also incorporating retrieval context.
+        """
+        # Reset budget counters for this turn
+        self.budget.reset()
+
+        base_prompt = self.session.system_prompt or DEVELOPER_AGENT_SYSTEM_PROMPT
+        self.budget.record("system_prompt", base_prompt)
+
         messages = [
-            ChatMessage(
-                role="system",
-                content=self.session.system_prompt or DEVELOPER_AGENT_SYSTEM_PROMPT,
-            ),
+            ChatMessage(role="system", content=base_prompt),
         ]
 
         current_thread = self.session.get_current_thread() or {}
@@ -287,6 +297,13 @@ class Agent:
         else:
             messages.append(ChatMessage(role="system", content=f"Current topic: {thread_topic}"))
 
+        # Inject working memory (task-scoped scratch-pad) — Gap 2 fix
+        wm_budget = self.budget.remaining("working_memory")
+        wm_block = self.working_memory.render(max_tokens=wm_budget)
+        if wm_block:
+            self.budget.record("working_memory", wm_block)
+            messages.append(ChatMessage(role="system", content=wm_block))
+
         retrieved = self._build_retrieved_context_block(query)
         if retrieved:
             messages.append(
@@ -300,6 +317,27 @@ class Agent:
                 )
             )
 
+        # Record history tokens and auto-compact if over budget — Gap 3 fix
+        history_text = "\n".join(
+            m.content for m in self.session.get_thread_messages(limit=self.config.context_recent_messages)
+        )
+        self.budget.record("history", history_text)
+
+        if self.config.auto_compact and self.budget.is_over_budget():
+            if self.memory_manager:
+                try:
+                    self.memory_manager.flush()
+                except Exception:
+                    pass
+            summary_text = self.session.compact()
+            # Re-index the compact summary — Gap 6 fix (shared with run_task path)
+            if summary_text:
+                self._reindex_compact_summary()
+            history_text = "\n".join(
+                m.content for m in self.session.get_thread_messages(limit=self.config.context_recent_messages)
+            )
+            self.budget.record("history", history_text)
+
         for msg in self.session.get_thread_messages(limit=self.config.context_recent_messages):
             messages.append(ChatMessage(role=msg.role, content=msg.content))
         return messages
@@ -310,6 +348,8 @@ class Agent:
         max_iterations: Optional[int] = None,
         preserve_state: bool = False,
         continuation_note: Optional[str] = None,
+        read_only: bool = False,
+        preserve_working_memory: bool = False,
     ) -> AgentResponse:
         """
         Run an autonomous task using the ReAct loop.
@@ -319,10 +359,17 @@ class Agent:
             max_iterations: Maximum iterations (overrides config)
             preserve_state: Keep previous goal/state/working memory for continuation
             continuation_note: Additional continuation guidance for resumed runs
+            read_only: If True, block file-mutating actions (used by chat mode)
+            preserve_working_memory: If True, skip clearing working memory (used by chat mode
+                so findings accumulate across turns and remain visible to /task calls)
 
         Returns:
             Final AgentResponse
         """
+        self._read_only = read_only
+        # Chat mode caps iterations to prevent tool-spinning loops
+        if read_only and not max_iterations:
+            max_iterations = self.config.max_chat_iterations
         max_iter = max_iterations or self.config.max_iterations
         effective_goal = task
         if preserve_state and self.session.state.goal:
@@ -331,7 +378,8 @@ class Agent:
             self.session.set_goal(task)
 
         # Reset task-scoped scratch-pad only for new tasks.
-        if preserve_state:
+        # Chat mode (preserve_working_memory=True) keeps WM alive across turns.
+        if preserve_state or preserve_working_memory:
             if not self.working_memory.goal:
                 self.working_memory.set_goal(effective_goal)
         else:
@@ -348,6 +396,22 @@ class Agent:
 
         # Start logging the interaction
         self.logger.start_interaction(self.session.id, effective_goal)
+
+        # Gap 5 fix: topic isolation for sequential run_task() calls
+        if not preserve_state:
+            recent_context = "\n".join(
+                m.content
+                for m in self.session.get_thread_messages(limit=self.config.context_recent_messages)
+                if m.role == "user"
+            )
+            if recent_context and self.topic_detector.is_topic_shift(recent_context, task):
+                self.session.create_thread(
+                    topic=self._topic_label_from_message(task), switch=True
+                )
+                # Topic shift always resets working memory — even in preserve_working_memory
+                # mode — so stale goals and findings don't bleed into the new topic.
+                self.working_memory.clear()
+                self.working_memory.set_goal(effective_goal)
 
         # Initial prompt with task
         if preserve_state:
@@ -368,10 +432,14 @@ class Agent:
                     content=resume_msg.content,
                 )
         else:
-            task_msg = self.session.add_message(
-                "user",
-                f"Task: {task}\n\nPlease analyze this task and create a plan, then execute it step by step.",
+            # Chat mode: send the raw message so the LLM answers directly without
+            # over-engineering a plan. Task mode: add the planning wrapper.
+            user_text = (
+                task
+                if read_only
+                else f"Task: {task}\n\nPlease analyze this task and create a plan, then execute it step by step."
             )
+            task_msg = self.session.add_message("user", user_text)
             if task_msg.thread_id:
                 self.conversation_index.index_message(
                     message_id=task_msg.id,
@@ -383,6 +451,8 @@ class Agent:
         self._emit("task_start", {"task": task})
 
         try:
+            _last_action: Optional[str] = None
+            _consecutive_repeats: int = 0
             for iteration in range(max_iter):
                 self._emit("iteration_start", {"iteration": iteration + 1})
 
@@ -399,6 +469,29 @@ class Agent:
                     return response
 
                 self._emit("thought", {"thought": response.thought})
+
+                # Detect repeated-action loops (e.g. wm_read × N) and break early
+                if response.action and not response.is_complete:
+                    if response.action == _last_action:
+                        _consecutive_repeats += 1
+                    else:
+                        _last_action = response.action
+                        _consecutive_repeats = 1
+                    if _consecutive_repeats >= 3:
+                        self.logger.log(
+                            LogLevel.WARNING,
+                            f"Loop detected: '{response.action}' repeated {_consecutive_repeats}x. Terminating.",
+                        )
+                        self.logger.end_interaction(status="completed", result="loop-break")
+                        return AgentResponse(
+                            is_complete=True,
+                            summary=(
+                                f"I got stuck repeating the same action (`{response.action}`). "
+                                "I cannot fulfil this request with the available tools. "
+                                "Please provide a specific URL if you want me to fetch online content, "
+                                "or rephrase your question."
+                            ),
+                        )
 
                 # Log iteration
                 observation = None
@@ -491,6 +584,8 @@ class Agent:
             self.create_checkpoint("task_failed", metadata={"error": str(e)})
             self.logger.end_interaction(status="failed", error=str(e))
             raise
+        finally:
+            self._read_only = False
 
     def create_checkpoint(
         self,
@@ -586,9 +681,20 @@ class Agent:
             self.budget.record("working_memory", wm_block)
             prefix_blocks.append(wm_block)
 
+        # Chat mode: append read-only constraint so the LLM avoids attempting blocked actions
+        chat_suffix = ""
+        if self._read_only:
+            chat_suffix = (
+                "\n\n## Chat Mode\n"
+                "You are in **read-only chat mode**. The following actions are blocked: "
+                "`write_file`, `create_file`, `run_command`, `run_in_docker`. "
+                "For tasks that require file changes or code execution, "
+                "tell the user to use `/task` instead."
+            )
+
         if prefix_blocks:
-            return "\n\n".join(prefix_blocks) + "\n\n" + base_prompt
-        return base_prompt
+            return "\n\n".join(prefix_blocks) + "\n\n" + base_prompt + chat_suffix
+        return base_prompt + chat_suffix
 
     def _get_llm_response(self) -> AgentResponse:
         """Get and parse LLM response.
@@ -596,6 +702,9 @@ class Agent:
         Builds the system prompt (which records budget for system/skills/mcp/memory),
         then records history tokens.  If the total exceeds the context window and
         auto_compact is enabled, the session is compacted before sending.
+
+        Also injects ConversationIndex retrieval context (Gap 4 fix) so the
+        run_task() path benefits from the same semantic search as chat().
         """
         system_prompt = self._build_system_prompt()
 
@@ -616,7 +725,10 @@ class Agent:
                     self.memory_manager.flush()
                 except Exception:
                     pass
-            self.session.compact()
+            summary_text = self.session.compact()
+            # Gap 6 fix: re-index compact summary into ConversationIndex
+            if summary_text:
+                self._reindex_compact_summary()
             # Re-record history after compaction
             history_text = "\n".join(m.content for m in self.session.get_thread_messages())
             self.budget.record("history", history_text)
@@ -625,7 +737,32 @@ class Agent:
             ChatMessage(role="system", content=system_prompt),
         ]
 
-        for msg in self.session.get_thread_messages():
+        # Gap 4 fix: inject ConversationIndex retrieval in run_task() path
+        # Use the last user message (or goal) as the retrieval query
+        thread_msgs = self.session.get_thread_messages()
+        retrieval_query = ""
+        for msg in reversed(thread_msgs):
+            if msg.role == "user":
+                retrieval_query = msg.content[:500]
+                break
+        if not retrieval_query:
+            retrieval_query = self.session.state.goal or ""
+
+        if retrieval_query:
+            retrieved = self._build_retrieved_context_block(retrieval_query)
+            if retrieved:
+                messages.append(
+                    ChatMessage(
+                        role="system",
+                        content=(
+                            "Use retrieved context only when relevant to the current task. "
+                            "If unrelated, ignore stale snippets.\n"
+                            f"{retrieved}"
+                        ),
+                    )
+                )
+
+        for msg in thread_msgs:
             messages.append(ChatMessage(role=msg.role, content=msg.content))
 
         # Log the request
@@ -699,6 +836,14 @@ class Agent:
 
     def _execute_action(self, action: str, params: Dict[str, Any]) -> ToolResult:
         """Execute an action using the tool registry."""
+        # Read-only mode: block actions that can mutate workspace source files
+        if self._read_only and action in _BLOCKED_IN_CHAT:
+            return ToolResult(
+                False,
+                "",
+                f"'{action}' is not allowed in chat mode. Use /task to make file changes.",
+            )
+
         action_map = {
             "read_file": lambda p: self.tools.read_file(
                 p.get("path", ""),

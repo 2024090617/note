@@ -51,11 +51,25 @@ def run_interactive(agent: Agent):
                     break
                 continue
 
-            # Regular chat
-            with console.status("[bold blue]Thinking...", spinner="dots"):
-                response = agent.chat(user_input)
+            # Regular chat (read-only mode, memory shared across turns)
+            def _on_thought(data):
+                if data.get("thought"):
+                    console.print(f"[dim]\U0001f4ad {data['thought'][:100]}...[/dim]")
 
-            console.print(Panel(Markdown(response), title="[bold blue]Assistant[/bold blue]"))
+            def _on_action(data):
+                icon = "\u2713" if data.get("success") else "\u2717"
+                console.print(f"[cyan]{icon} {data.get('action')}[/cyan]")
+
+            agent.on("thought", _on_thought)
+            agent.on("action_result", _on_action)
+
+            with console.status("[bold blue]Thinking...", spinner="dots"):
+                result = agent.run_task(
+                    user_input, read_only=True, preserve_working_memory=True
+                )
+
+            if result.summary:
+                console.print(Panel(Markdown(result.summary), title="[bold blue]Assistant[/bold blue]"))
 
         except KeyboardInterrupt:
             console.print("\n[yellow]Use /quit to exit[/yellow]")

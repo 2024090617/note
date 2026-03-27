@@ -52,6 +52,9 @@ class AgentConfig:
     response_reserve: int = 4_096   # tokens reserved for LLM response
     auto_compact: bool = True       # auto-compact session when budget exceeded
 
+    # Chat mode settings
+    max_chat_iterations: int = 6   # cap for read-only chat turns (prevents wm_read loops)
+
     # Topic-isolated context settings
     context_recent_messages: int = 4
     context_retrieval_limit: int = 4
@@ -90,6 +93,7 @@ class AgentConfig:
             context_recent_messages=data.get("context_recent_messages", 4),
             context_retrieval_limit=data.get("context_retrieval_limit", 4),
             topic_shift_threshold=data.get("topic_shift_threshold", 0.55),
+            max_chat_iterations=data.get("max_chat_iterations", 6),
         )
 
 
