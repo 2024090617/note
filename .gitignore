@@ -4,3 +4,5 @@ __pycache__/
 llm_service.egg-info/
 knowledge-base/models/
 .claude/
+.digimate/
+.pytest_cache/

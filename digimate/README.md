@@ -1,0 +1,102 @@
+# digimate
+
+Lightweight ReAct-pattern developer agent with Claude-Code-style memory and MCP support.
+
+## Quick Start
+
+```bash
+# Install
+pip install -e .
+
+# Show help
+digimate --help
+
+# Run a task (Copilot backend)
+digimate "list all Python files in this project"
+
+# Interactive mode
+digimate -i
+
+# OpenAI-compatible backend (Ollama)
+digimate --backend openai --api-base http://localhost:11434/v1 --model llama3 "hello"
+
+# With MCP servers
+digimate --mcp-config mcp.json -i
+```
+
+## Architecture
+
+```
+src/digimate/
+├── core/
+│   ├── agent.py          # ReAct loop
+│   ├── config.py          # AgentConfig
+│   ├── types.py           # ChatMessage, ToolResult, AgentResponse
+│   ├── log.py             # Tracer (stderr + JSONL)
+│   └── content.py         # Observation truncation guard
+├── llm/
+│   ├── base.py            # Abstract LLMClient
+│   ├── copilot.py         # VS Code Copilot Bridge
+│   └── openai_compat.py   # Ollama, OpenRouter, etc.
+├── memory/
+│   ├── base.py            # MemoryEntry, MemoryStrategy ABC
+│   ├── markdown.py        # CLAUDE.md + MEMORY.md discovery
+│   └── working.py         # Task-scoped scratch-pad
+├── tools/
+│   ├── base.py            # ToolRegistry
+│   ├── file_ops.py        # read/write/patch/delete + web fetch
+│   ├── search_ops.py      # grep, glob, ripgrep
+│   ├── terminal.py        # Command execution
+│   ├── git_ops.py         # Git operations
+│   ├── sandbox.py         # Docker sandbox
+│   └── mcp.py             # MCP client + proxy
+├── workspace/
+│   ├── scanner.py         # Language/framework detection
+│   └── rules.py           # Instruction file discovery
+├── session/
+│   ├── session.py         # Linear conversation history
+│   ├── budget.py          # Context budget manager
+│   └── compact.py         # Auto-compaction
+├── skills/
+│   └── loader.py          # Skill discovery (agentskills.io)
+├── prompt/
+│   └── system.py          # Modular prompt builder
+└── cli/
+    ├── main.py            # Click entrypoint
+    └── runner.py           # Interactive + non-interactive
+```
+
+## Key Features
+
+- **Two LLM backends**: VS Code Copilot Bridge + any OpenAI-compatible API (Ollama, OpenRouter, etc.)
+- **Flat tool registry**: Declarative `register(name, fn, mutating=True/False)` — mutating tools auto-blocked in chat mode
+- **Memory**: Claude-Code-style instruction files (`CLAUDE.md`, `.github/copilot-instructions.md`, `.digimate/rules/*.md`) + persistent auto-memory (`MEMORY.md`)
+- **Working memory**: Task-scoped KV scratch-pad, visible every turn
+- **MCP support**: JSON-RPC over stdio, compatible with Claude Desktop / Cursor config format
+- **Tracer**: Lightweight process-flow log — ANSI stderr + JSONL file
+- **Content guard**: Two-layer defence against oversized tool results (Layer 1: universal 12K token cap, Layer 2: tool-specific caps)
+- **Auto-compaction**: Context budget manager with automatic session compaction
+
+## Slash Commands (Interactive Mode)
+
+| Command | Description |
+|---------|-------------|
+| `/help` | Show help |
+| `/task <desc>` | Run autonomous task |
+| `/status` | Show agent status |
+| `/model <name>` | Switch model |
+| `/save <path>` | Save session |
+| `/load <path>` | Load session |
+| `/memory` | Show memory files |
+| `/clear` | Clear conversation |
+| `/quit` | Exit |
+
+## Testing
+
+```bash
+pytest tests/ -x -q
+```
+
+## License
+
+MIT
